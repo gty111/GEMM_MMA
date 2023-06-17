@@ -419,8 +419,8 @@ GpuTimer timer;
 template<int i,int j>
 void launch_GEMM_MMA_i_j(){
     cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_mma_d(problem_size.mn());
-    std::string name_kernel = "MMA_tune_" + std::to_string(i) + "_" + std::to_string(j);
-    std::string name_test = "cuMMA==MMA_tune_" + std::to_string(i) + "_" + std::to_string(j);
+    std::string name_kernel = "MMA_" + std::to_string(i) + "_" + std::to_string(j);
+    std::string name_test = "cutlassMMA==MMA_" + std::to_string(i) + "_" + std::to_string(j);
     timer.bind_run(name_kernel,[&]{
         MMAarguments mmaArg{
             problem_size,
@@ -475,9 +475,9 @@ int main(int argc,char **argv){
         0
     );
 
-    ////////////////////cuMMA////////////////////////////////
+    ////////////////////cutlassMMA////////////////////////////////
 
-    timer.bind_run("cuMMA",[&]{
+    timer.bind_run("cutlassMMA",[&]{
         // Initialize alpha and beta for dot product computation
         ElementComputeEpilogue alpha = ElementComputeEpilogue(1);
         ElementComputeEpilogue beta = ElementComputeEpilogue(1);
