@@ -8,9 +8,130 @@
 #include "cutlass/util/reference/host/tensor_elementwise.h"
 #include "cutlass/util/tensor_view_io.h"
 
-#include "helper.h"
-
 #include <iostream>
+#include <functional>
+
+/**
+ * Panic wrapper for unwinding CUTLASS errors
+ */
+#define CUTLASS_CHECK(status)                                                                    \
+  {                                                                                              \
+    cutlass::Status error = status;                                                              \
+    if (error != cutlass::Status::kSuccess) {                                                    \
+      std::cerr << "Got cutlass error: " << cutlassGetStatusString(error) << " at: " << __LINE__ \
+                << std::endl;                                                                    \
+      exit(EXIT_FAILURE);                                                                        \
+    }                                                                                            \
+  }
+
+
+/**
+ * Panic wrapper for unwinding CUDA runtime errors
+ */
+#define CUDA_CHECK(status)                                              \
+  {                                                                     \
+    cudaError_t error = status;                                         \
+    if (error != cudaSuccess) {                                         \
+      std::cerr << "Got bad cuda status: " << cudaGetErrorString(error) \
+                << " at line: " << __LINE__ << std::endl;               \
+      exit(EXIT_FAILURE);                                               \
+    }                                                                   \
+  }
+
+/**
+ * GPU timer for recording the elapsed time across kernel(s) launched in GPU stream
+ */
+struct GpuTimer
+{
+    cudaStream_t _stream_id;
+    cudaEvent_t _start;
+    cudaEvent_t _stop;
+    cutlass::gemm::GemmCoord problem_size={0,0,0};
+
+    /// Constructor
+    GpuTimer() : _stream_id(0)
+    {
+        CUDA_CHECK(cudaEventCreate(&_start));
+        CUDA_CHECK(cudaEventCreate(&_stop));
+    }
+
+    /// Destructor
+    ~GpuTimer()
+    {
+        CUDA_CHECK(cudaEventDestroy(_start));
+        CUDA_CHECK(cudaEventDestroy(_stop));
+    }
+
+    void set(cutlass::gemm::GemmCoord &_problem_size){
+        problem_size = _problem_size;
+    }
+
+    /// Start the timer for a given stream (defaults to the default stream)
+    void start(cudaStream_t stream_id = 0)
+    {
+        _stream_id = stream_id;
+        CUDA_CHECK(cudaEventRecord(_start, _stream_id));
+    }
+
+    /// Stop the timer
+    void stop()
+    {
+        CUDA_CHECK(cudaEventRecord(_stop, _stream_id));
+    }
+
+    /// Return the elapsed time (in milliseconds)
+    float elapsed_millis()
+    {
+        float elapsed = 0.0;
+        CUDA_CHECK(cudaEventSynchronize(_stop));
+        CUDA_CHECK(cudaEventElapsedTime(&elapsed, _start, _stop));
+        return elapsed;
+    }
+
+    void bind_run(std::string name,const std::function<void()> &kernel,int test_time=10){
+        float run_ms = 0;
+        for(int i=0;i<test_time;i++){
+            start();
+            kernel();
+            stop();
+            run_ms += elapsed_millis();
+        }
+        run_ms /= (float)test_time;
+        if(problem_size.product()){
+            double gflops = (double)problem_size.product()*2 / 1e9 / (run_ms/1e3);
+            std::printf("[%20s] Runtime: %f(ms) Gflops: %f\n",name.c_str(),run_ms,gflops);
+        }else{
+            std::printf("[%20s] Runtime: %f(ms)\n",name.c_str(),run_ms);
+        }
+    }
+
+    template<typename E,typename L>
+    void testEqual(std::string name,cutlass::HostTensor<E,L> &a,cutlass::HostTensor<E,L> &b,bool ifprint=0){
+        a.sync_host();
+        b.sync_host();
+        bool passed = cutlass::reference::host::TensorEquals(
+            a.host_view(),
+            b.host_view()
+        );
+
+        if(passed) std::printf("[%20s] PASS\n",name.c_str());
+        else {
+            std::printf("[%20s] FAIL\n",name.c_str());
+            if(ifprint){
+                std::cout << "[a]:\n" << a.host_view() << std::endl;
+                std::cout << "[b]:\n" << b.host_view() << std::endl;
+                cutlass::reference::host::TensorSub<E,L,E,L,E,L>(a.host_view(),b.host_ref());
+                std::cout << "diff:\n" << a.host_view() << std::endl;
+            }
+        }
+    }
+
+    template<typename E,typename L>
+    void printTensor(std::string name,cutlass::HostTensor<E,L> &a){
+        a.sync_host();
+        std::cout << name << ":\n" << a.host_view() << std::endl;
+    }
+};
 
 // The code section below describes datatype for input, output matrices and computation between
 // elements in input matrices.
@@ -72,8 +193,6 @@ using Gemm = cutlass::gemm::device::Gemm<ElementInputA,
                                          SwizzleThreadBlock,
                                          NumStages>;
 
-
-const int blockdim = 128;
 const int M = ShapeMMAOp::kM;
 const int N = ShapeMMAOp::kN;
 const int K = ShapeMMAOp::kK;
@@ -86,59 +205,79 @@ struct MMAarguments{
     ElementOutput *D;
 };
 
+template<int NWARP_X=2,int NWARP_Y=2>
 __device__ void loadtileA(MMAarguments &arg,ElementInputA *tileA,int idx){
-    const int iter = 2*M*K / blockdim;
-    CUTLASS_PRAGMA_UNROLL
+    const int nrow = NWARP_Y * M;
+    const int ncol = K;
+    const int size = nrow * ncol;
+    const int iter = (size+blockDim.x-1) / blockDim.x;
+    // CUTLASS_PRAGMA_UNROLL
     for(int i=0;i<iter;i++){
         int tileIdx = threadIdx.x*iter + i;
-        int rowA = blockIdx.x*2*M + tileIdx/K ;
-        int colA = idx*K + tileIdx%K ;
+        if(tileIdx>=size)return;
+        int rowA = blockIdx.x*nrow + tileIdx/ncol ;
+        int colA = idx*ncol + tileIdx%ncol ;
         tileA[tileIdx] = rowA<arg.problem_size.m() && colA<arg.problem_size.k() ? arg.A[rowA*arg.problem_size.k()+colA] : ElementInputA(0);
     }
 }
 
+template<int NWARP_X=2,int NWARP_Y=2>
 __device__ void loadtileB(MMAarguments &arg,ElementInputB *tileB,int idx){
-    const int iter = 2*N*K/blockdim;
-    CUTLASS_PRAGMA_UNROLL
+    const int nrow = K;
+    const int ncol = NWARP_X * N;
+    const int size = nrow * ncol;
+    const int iter = (size+blockDim.x-1) / blockDim.x;
+    // CUTLASS_PRAGMA_UNROLL
     for(int i=0;i<iter;i++){
         int tileIdx = threadIdx.x*iter + i;
-        int rowB = idx*K + tileIdx%K ;
-        int colB = blockIdx.y*2*N + tileIdx/K ;
+        if(tileIdx>=size)return;
+        int rowB = idx*nrow + tileIdx%nrow ;
+        int colB = blockIdx.y*ncol + tileIdx/nrow ;
         tileB[tileIdx] = rowB<arg.problem_size.k() && colB<arg.problem_size.n() ? arg.B[colB*arg.problem_size.k()+rowB] : ElementInputB(0);
     }
 }
 
+template<int NWARP_X=2,int NWARP_Y=2>
 __device__ void loadtileC(MMAarguments &arg,ElementAccumulator *tileC){
-    const int iter = 2*M*2*N/blockdim;
-    CUTLASS_PRAGMA_UNROLL
+    const int nrow = NWARP_Y * M;
+    const int ncol = NWARP_X * N; 
+    const int size = nrow * ncol;
+    const int iter = (size+blockDim.x-1) / blockDim.x;
+    // CUTLASS_PRAGMA_UNROLL
     for(int i=0;i<iter;i++){
         int tileIdx = threadIdx.x*iter + i;
-        int rowC = blockIdx.x*2*M + tileIdx/(2*N);
-        int colC = blockIdx.y*2*N + tileIdx%(2*N);
+        if(tileIdx>=size)return;
+        int rowC = blockIdx.x*nrow + tileIdx/ncol;
+        int colC = blockIdx.y*ncol + tileIdx%ncol;
         tileC[tileIdx] = rowC<arg.problem_size.m() && colC<arg.problem_size.n() ? arg.C[rowC*arg.problem_size.n()+colC] : ElementAccumulator(0);
     }
 }
 
-__device__ void mvtile(MMAarguments &arg,ElementAccumulator *dst,ElementOutput *src,int size){
-    const int iter = size/blockdim;
-    CUTLASS_PRAGMA_UNROLL
-    for(int i=0;i<iter;i++){
-        int tileIdx = threadIdx.x*iter + i;
-        dst[tileIdx] = src[tileIdx]; 
-    }
-}
+// template<int NWARP_X=2,int NWARP_Y=2>
+// __device__ void mvtile(MMAarguments &arg,ElementAccumulator *dst,ElementOutput *src){
+//     const int size = NWARP_X*NWARP_Y*M*N;
+//     const int iter = (size+blockDim.x-1) / blockDim.x;
+//     // CUTLASS_PRAGMA_UNROLL
+//     for(int i=0;i<iter;i++){
+//         int tileIdx = threadIdx.x*iter + i;
+//         if(tileIdx>=size)return;
+//         dst[tileIdx] = src[tileIdx]; 
+//     }
+// }
 
+
+template<int NWARP_X=2,int NWARP_Y=2>
 __device__ void mmatile(MMAarguments &arg,ElementInputA *A,ElementInputB *B,ElementAccumulator *C,ElementOutput *D){
-    int warpidx = threadIdx.x / 32;
-    int rowwarp = warpidx/2;
-    int colwarp = warpidx%2;
-    int laneidx = threadIdx.x % 32;
+    const int warpidx = threadIdx.x / 32;
+    const int rowwarp = warpidx / NWARP_X;
+    const int colwarp = warpidx % NWARP_X;
+    const int laneidx = threadIdx.x % 32;
 
     int a[4],b[2],cd[4];
 
-    cd[0] = (rowwarp*M+laneidx/4)*2*N+colwarp*N+laneidx%4*2;
+    cd[0] = (rowwarp*M+laneidx/4)*NWARP_X*N+colwarp*N+laneidx%4*2;
     cd[1] = cd[0] + 1;
-    cd[2] = cd[0] + 8*2*N;
+    cd[2] = cd[0] + 8*NWARP_X*N;
     cd[3] = cd[2] + 1;
 
     a[0] = (rowwarp*M+laneidx/4)*K+laneidx%4;
@@ -171,23 +310,28 @@ __device__ void mmatile(MMAarguments &arg,ElementInputA *A,ElementInputB *B,Elem
     );
 }
 
-__device__ void inittileD(ElementOutput *outD){
-    const int iter = 2*M*2*N / blockdim;
-    CUTLASS_PRAGMA_UNROLL
-    for(int i=0;i<iter;i++){
-        outD[i+threadIdx.x*iter] = 0;
-    }
-}
+// __device__ void inittileD(ElementOutput *outD){
+//     const int iter = 2*M*2*N / blockdim;
+//     CUTLASS_PRAGMA_UNROLL
+//     for(int i=0;i<iter;i++){
+//         outD[i+threadIdx.x*iter] = 0;
+//     }
+// }
 
-__device__ void storetileD(MMAarguments &arg,ElementOutput *outD){
-    const int iter = 2*M*2*N/blockdim;
-    CUTLASS_PRAGMA_UNROLL
+template<int NWARP_X=2,int NWARP_Y=2>
+__device__ void storetile(MMAarguments &arg,ElementOutput *out){
+    const int row = NWARP_Y * M;
+    const int col = NWARP_X * N;
+    const int size = row*col;
+    const int iter = (size+blockDim.x-1)/blockDim.x;
+    // CUTLASS_PRAGMA_UNROLL
     for(int i=0;i<iter;i++){
         int tileIdx = threadIdx.x*iter + i;
-        int rowD = blockIdx.x*2*M + tileIdx/(2*N);
-        int colD = blockIdx.y*2*N + tileIdx%(2*N);
+        if(tileIdx>=size)return;
+        int rowD = blockIdx.x*row + tileIdx/col;
+        int colD = blockIdx.y*col + tileIdx%col;
         if(rowD<arg.problem_size.m() && colD<arg.problem_size.n()) {
-            arg.D[rowD*arg.problem_size.n()+colD] = outD[tileIdx];
+            arg.D[rowD*arg.problem_size.n()+colD] = out[tileIdx];
         }
     }
 }
@@ -206,63 +350,106 @@ __device__ void printtile(T *arr,int row,int col,bool rowMajor){
     }
 }
 
+// __global__ void GEMM_MMA(MMAarguments arg){
+//     __shared__ ElementInputA tileA[M*2*K]; 
+//     __shared__ ElementInputB tileB[K*N*2]; 
+//     __shared__ ElementOutput tileC[2*M*2*N];
+//     __shared__ ElementOutput tileD[2*M*2*N];
+
+//     const int iters = (arg.problem_size.k() + K - 1) / K;
+
+//     loadtileC(arg,tileC);
+    
+//     for(int idx=0;idx<iters;idx++){
+//         loadtileA(arg,tileA,idx);
+//         loadtileB(arg,tileB,idx);
+//         __syncthreads();
+//         mmatile(arg,tileA,tileB,tileC,tileD);
+//         __syncthreads();
+//         mvtile(arg,tileC,tileD);
+//     }
+//     storetile(arg,tileD);
+// }
+
+template<int NWARP_X=2,int NWARP_Y=2>
 __global__ void GEMM_MMA(MMAarguments arg){
-    __shared__ ElementInputA tileA[M*2*K]; 
-    __shared__ ElementInputB tileB[K*N*2]; 
-    __shared__ ElementOutput tileC[2*M*2*N];
-    __shared__ ElementOutput tileD[2*M*2*N];
+    __shared__ ElementInputA tileA[NWARP_Y*M * K]; 
+    __shared__ ElementInputB tileB[K * NWARP_X*N]; 
+    __shared__ ElementOutput tileC[NWARP_Y*M * NWARP_X*N];
 
     const int iters = (arg.problem_size.k() + K - 1) / K;
 
-    // inittileD(tileD);
-    loadtileC(arg,tileC);
+    loadtileC<NWARP_X,NWARP_Y>(arg,tileC);
     
     for(int idx=0;idx<iters;idx++){
-        loadtileA(arg,tileA,idx);
-        loadtileB(arg,tileB,idx);
+        loadtileA<NWARP_X,NWARP_Y>(arg,tileA,idx);
+        loadtileB<NWARP_X,NWARP_Y>(arg,tileB,idx);
         __syncthreads();
-        mmatile(arg,tileA,tileB,tileC,tileD);
+        mmatile<NWARP_X,NWARP_Y>(arg,tileA,tileB,tileC,tileC);
         __syncthreads();
-        mvtile(arg,tileC,tileD,2*M*2*N);
     }
-    __syncthreads();
-    storetileD(arg,tileD);
+    storetile<NWARP_X,NWARP_Y>(arg,tileC);
 }
 
+template<int NWARP_X=2,int NWARP_Y=2>
 void launch_GEMM_MMA(MMAarguments arg){
     dim3 grid,block;
-    grid.x = (arg.problem_size.m()+M*2-1)/(M*2);
-    grid.y = (arg.problem_size.n()+N*2-1)/(N*2);
+    grid.x = (arg.problem_size.m()+M*NWARP_Y-1)/(M*NWARP_Y);
+    grid.y = (arg.problem_size.n()+N*NWARP_X-1)/(N*NWARP_X);
     grid.z = 1;
 
-    block.x = blockdim;
+    block.x = NWARP_X * NWARP_Y * 32;
     block.y = 1;
     block.z = 1;
 
-    GEMM_MMA<<<grid,block>>>(arg);
+    GEMM_MMA<NWARP_X,NWARP_Y><<<grid,block>>>(arg);
+}
+
+// Create a tuple of problem size for matrix multiplication
+cutlass::gemm::GemmCoord problem_size = {5120,4096,4096};
+
+// Initialize tensors using CUTLASS helper functions
+cutlass::HostTensor<ElementInputA, LayoutInputA> tensor_a;  // <- Create matrix A with dimensions M x K
+cutlass::HostTensor<ElementInputB, LayoutInputB> tensor_b;  // <- Create matrix B with dimensions K x N
+cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c;  // <- Create matrix C with dimensions M x N
+cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d;  
+
+GpuTimer timer;
+
+template<int i,int j>
+void launch_GEMM_MMA_i_j(){
+    cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_mma_d(problem_size.mn());
+    std::string name_kernel = "MMA_tune_" + std::to_string(i) + "_" + std::to_string(j);
+    std::string name_test = "cuMMA==MMA_tune_" + std::to_string(i) + "_" + std::to_string(j);
+    timer.bind_run(name_kernel,[&]{
+        MMAarguments mmaArg{
+            problem_size,
+            tensor_a.device_data(),
+            tensor_b.device_data(),
+            tensor_c.device_data(),
+            tensor_mma_d.device_data()
+        };
+        launch_GEMM_MMA<i,j>(mmaArg);
+    });
+    
+    timer.testEqual<ElementOutput,LayoutOutput>(name_test,tensor_d,tensor_mma_d);
 }
 
 int main(int argc,char **argv){
-    // Create a tuple of problem size for matrix multiplication
-    cutlass::gemm::GemmCoord problem_size = {16,8,8};
+    //////////////////////////INIT////////////////////////////////
 
     if(argc>=2)problem_size.m()=atoi(argv[1]);
     if(argc>=3)problem_size.n()=atoi(argv[2]);
     if(argc>=4)problem_size.k()=atoi(argv[3]);
 
-    // Initialize tensors using CUTLASS helper functions
-    cutlass::HostTensor<ElementInputA, LayoutInputA> tensor_a(
-      problem_size.mk());  // <- Create matrix A with dimensions M x K
-    cutlass::HostTensor<ElementInputB, LayoutInputB> tensor_b(
-      problem_size.kn());  // <- Create matrix B with dimensions K x N
-    cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(
-      problem_size.mn());  // <- Create matrix C with dimensions M x N
-    cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d(
-      problem_size.mn());  // <- Create matrix D with dimensions M x N used to store output from
-                           // CUTLASS kernel
-    cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_mma_d(
-      problem_size.mn());  // <- Create matrix D with dimensions M x N used to store output from
-                           // reference kernel
+    printf("[%20s] (%d,%d,%d)\n","problem size",problem_size.m(),problem_size.n(),problem_size.k());
+
+    tensor_a.resize(problem_size.mk());
+    tensor_b.resize(problem_size.kn());
+    tensor_c.resize(problem_size.mn());
+    tensor_d.resize(problem_size.mn());
+
+    timer.set(problem_size);
     
     cutlass::reference::device::TensorFillRandomUniform(
         tensor_a.device_view(),
@@ -288,95 +475,65 @@ int main(int argc,char **argv){
         0
     );
 
-    MMAarguments mmaArg{
-        problem_size,
-        tensor_a.device_data(),
-        tensor_b.device_data(),
-        tensor_c.device_data(),
-        tensor_mma_d.device_data()
-    };
+    ////////////////////cuMMA////////////////////////////////
 
-    GpuTimer mmatimer;
-    mmatimer.start();
-    launch_GEMM_MMA(mmaArg);
-    mmatimer.stop();
+    timer.bind_run("cuMMA",[&]{
+        // Initialize alpha and beta for dot product computation
+        ElementComputeEpilogue alpha = ElementComputeEpilogue(1);
+        ElementComputeEpilogue beta = ElementComputeEpilogue(1);
 
-    tensor_mma_d.sync_host();
+        // Split K dimension into 1 partitions
+        int split_k_slices = 1;
 
-    float mmarun_ms = mmatimer.elapsed_millis();
+        // Create a tuple of gemm kernel arguments. This is later passed as arguments to launch
+        // instantiated CUTLASS kernel
+        typename Gemm::Arguments arguments{problem_size,  // <- problem size of matrix multiplication
+                                        tensor_a.device_ref(),  // <- reference to matrix A on device
+                                        tensor_b.device_ref(),  // <- reference to matrix B on device
+                                        tensor_c.device_ref(),  // <- reference to matrix C on device
+                                        tensor_d.device_ref(),  // <- reference to matrix D on device
+                                        {alpha, beta},          // <- tuple of alpha and beta
+                                        split_k_slices};        // <- k-dimension split factor
 
-    double mmagflops = (double)problem_size.product()*2 / 1e9 / (mmarun_ms/1e3);
+        // Using the arguments, query for extra workspace required for matrix multiplication computation
+        size_t workspace_size = Gemm::get_workspace_size(arguments);
 
-    std::cout << "Runtime(MMA): " << mmarun_ms << " ms" << std::endl;
-    std::cout << "Gflops(MMA): " << mmagflops << std::endl; 
+        // Allocate workspace memory
+        cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
-    // Initialize alpha and beta for dot product computation
-    ElementComputeEpilogue alpha = ElementComputeEpilogue(1);
-    ElementComputeEpilogue beta = ElementComputeEpilogue(1);
+        // Instantiate CUTLASS kernel depending on templates
+        Gemm gemm_op;
 
-    // Split K dimension into 1 partitions
-    int split_k_slices = 1;
+        // Check the problem size is supported or not 
+        cutlass::Status status = gemm_op.can_implement(arguments);
+        CUTLASS_CHECK(status);
 
-    // Create a tuple of gemm kernel arguments. This is later passed as arguments to launch
-    // instantiated CUTLASS kernel
-    typename Gemm::Arguments arguments{problem_size,  // <- problem size of matrix multiplication
-                                     tensor_a.device_ref(),  // <- reference to matrix A on device
-                                     tensor_b.device_ref(),  // <- reference to matrix B on device
-                                     tensor_c.device_ref(),  // <- reference to matrix C on device
-                                     tensor_d.device_ref(),  // <- reference to matrix D on device
-                                     {alpha, beta},          // <- tuple of alpha and beta
-                                     split_k_slices};        // <- k-dimension split factor
+        // Initialize CUTLASS kernel with arguments and workspace pointer
+        status = gemm_op.initialize(arguments, workspace.get());
+        CUTLASS_CHECK(status);
 
-    // Using the arguments, query for extra workspace required for matrix multiplication computation
-    size_t workspace_size = Gemm::get_workspace_size(arguments);
+        // Launch CUTLASS kernel
+        status = gemm_op();
+        CUTLASS_CHECK(status);
+    });
 
-    // Allocate workspace memory
-    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
-
-    // Instantiate CUTLASS kernel depending on templates
-    Gemm gemm_op;
-
-    // Check the problem size is supported or not 
-    cutlass::Status status = gemm_op.can_implement(arguments);
-    CUTLASS_CHECK(status);
-
-    // Initialize CUTLASS kernel with arguments and workspace pointer
-    status = gemm_op.initialize(arguments, workspace.get());
-    CUTLASS_CHECK(status);
-
-    GpuTimer cutimer;
-
-    cutimer.start();
-    status = gemm_op();
-    cutimer.stop();
-    CUTLASS_CHECK(status);
-
-    tensor_d.sync_host();
-
-    float curun_ms = cutimer.elapsed_millis();
-
-    double cugflops = (double)problem_size.product()*2 / 1e9 / (curun_ms/1e3);
-
-    std::cout << "Runtime(cutlass): " << curun_ms << " ms" << std::endl;
-    std::cout << "Gflops(cutlass): " << cugflops << std::endl; 
-
-    bool passed = cutlass::reference::host::TensorEquals(
-        tensor_d.host_view(),
-        tensor_mma_d.host_view()
-    );
-
-    if(passed) std::cout << "PASS\n";
-    else {
-        std::cout << "FAIL\n";
-        tensor_a.sync_host();
-        tensor_b.sync_host();
-        tensor_c.sync_host();
-        // std::cout << "A:\n" << tensor_a.host_view() << std::endl;
-        // std::cout << "B:\n" << tensor_b.host_view() << std::endl;
-        // std::cout << "C:\n" << tensor_c.host_view() << std::endl;
-        // std::cout << "D(cutlass):\n" << tensor_d.host_view() << std::endl;
-        // std::cout << "D(MMA)\n" << tensor_mma_d.host_view() << std::endl; 
-        cutlass::reference::host::TensorSub<ElementOutput,LayoutOutput,ElementOutput,LayoutOutput,ElementOutput,LayoutOutput>(tensor_d.host_view(),tensor_mma_d.host_ref());
-        std::cout << "diff=D(cutlass)-D(MMA):\n" << tensor_d.host_view() << std::endl;
+    //////////////////////GEMM_MMA_i_j///////////////////////
+    {
+        launch_GEMM_MMA_i_j<1,1>();
+        launch_GEMM_MMA_i_j<1,2>();
+        launch_GEMM_MMA_i_j<1,3>();
+        launch_GEMM_MMA_i_j<1,4>();
+        launch_GEMM_MMA_i_j<2,1>();
+        launch_GEMM_MMA_i_j<2,2>();
+        launch_GEMM_MMA_i_j<2,3>();
+        launch_GEMM_MMA_i_j<2,4>();
+        launch_GEMM_MMA_i_j<3,1>();
+        launch_GEMM_MMA_i_j<3,2>();
+        launch_GEMM_MMA_i_j<3,3>();
+        launch_GEMM_MMA_i_j<3,4>();
+        launch_GEMM_MMA_i_j<4,1>();
+        launch_GEMM_MMA_i_j<4,2>();
+        launch_GEMM_MMA_i_j<4,3>();
+        launch_GEMM_MMA_i_j<4,4>(); 
     }
 }
