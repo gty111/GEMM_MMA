@@ -1,0 +1,34 @@
+[        problem size] (5120,4096,4096)
+[          cutlassMMA] Runtime: 2.405991(ms) Gflops: 71404.556526
+[             MMA_1_1] Runtime: 82.386307(ms) Gflops: 2085.282113
+[ cutlassMMA==MMA_1_1] PASS
+[             MMA_1_2] Runtime: 79.756462(ms) Gflops: 2154.041031
+[ cutlassMMA==MMA_1_2] PASS
+[             MMA_1_3] Runtime: 67.411049(ms) Gflops: 2548.524236
+[ cutlassMMA==MMA_1_3] PASS
+[             MMA_1_4] Runtime: 66.942772(ms) Gflops: 2566.351630
+[ cutlassMMA==MMA_1_4] PASS
+[             MMA_2_1] Runtime: 41.768246(ms) Gflops: 4113.141191
+[ cutlassMMA==MMA_2_1] PASS
+[             MMA_2_2] Runtime: 34.134132(ms) Gflops: 5033.046978
+[ cutlassMMA==MMA_2_2] PASS
+[             MMA_2_3] Runtime: 33.721062(ms) Gflops: 5094.699963
+[ cutlassMMA==MMA_2_3] PASS
+[             MMA_2_4] Runtime: 31.809515(ms) Gflops: 5400.858575
+[ cutlassMMA==MMA_2_4] PASS
+[             MMA_3_1] Runtime: 34.388866(ms) Gflops: 4995.764900
+[ cutlassMMA==MMA_3_1] PASS
+[             MMA_3_2] Runtime: 27.578543(ms) Gflops: 6229.433283
+[ cutlassMMA==MMA_3_2] PASS
+[             MMA_3_3] Runtime: 26.916382(ms) Gflops: 6382.681480
+[ cutlassMMA==MMA_3_3] PASS
+[             MMA_3_4] Runtime: 25.842243(ms) Gflops: 6647.979068
+[ cutlassMMA==MMA_3_4] PASS
+[             MMA_4_1] Runtime: 39.947754(ms) Gflops: 4300.584515
+[ cutlassMMA==MMA_4_1] PASS
+[             MMA_4_2] Runtime: 31.890951(ms) Gflops: 5387.067040
+[ cutlassMMA==MMA_4_2] PASS
+[             MMA_4_3] Runtime: 32.361828(ms) Gflops: 5308.683200
+[ cutlassMMA==MMA_4_3] PASS
+[             MMA_4_4] Runtime: 31.914679(ms) Gflops: 5383.061949
+[ cutlassMMA==MMA_4_4] PASS
