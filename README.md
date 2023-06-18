@@ -4,7 +4,7 @@ GEMM MMA 构建了一个初级的GEMM kernel， 它使用CUDA `mma.sync`指令�
 
 ## [切换到vector分支](https://github.com/gty111/GEMM_MMA/tree/vector)
 
-vector分支主要对比了向量化load和store和base方法差距
+vector分支主要介绍向量化load/store
 
 ## 总体思路
 
