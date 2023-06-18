@@ -10,6 +10,10 @@ vector分支主要介绍向量化load/store
 
 bfco分支主要介绍如何通过解决shared memory bank conflict 和 memory coalesce (访存合并) 来优化性能
 
+## [切换到ldgsts分支](https://github.com/gty111/GEMM_MMA/tree/ldgsts)
+
+ldgsts 分支主要来介绍使用Ampere引入的异步拷贝来优化性能
+
 ## 总体思路
 
 <img src="pic/gemm_mma.png" title="" alt="" width="491">
