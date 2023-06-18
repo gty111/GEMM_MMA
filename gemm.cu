@@ -11,6 +11,8 @@
 #include <iostream>
 #include <functional>
 
+#define ENABLE_CUTLASS 1
+
 /**
  * Panic wrapper for unwinding CUTLASS errors
  */
@@ -205,134 +207,220 @@ struct MMAarguments{
     ElementOutput *D;
 };
 
-template<int NWARP_X=2,int NWARP_Y=2>
-__device__ void loadtileA(MMAarguments &arg,ElementInputA *tileA,int idx){
-    const int nrow = NWARP_Y * M;
-    const int ncol = K;
-    const int size = nrow * ncol;
-    const int iter = (size+blockDim.x-1) / blockDim.x;
-    // CUTLASS_PRAGMA_UNROLL
-    for(int i=0;i<iter;i++){
-        int tileIdx = threadIdx.x*iter + i;
-        if(tileIdx>=size)return;
-        int rowA = blockIdx.x*nrow + tileIdx/ncol ;
-        int colA = idx*ncol + tileIdx%ncol ;
-        tileA[tileIdx] = rowA<arg.problem_size.m() && colA<arg.problem_size.k() ? arg.A[rowA*arg.problem_size.k()+colA] : ElementInputA(0);
+__device__ void loadtileC(MMAarguments &arg,ElementOutput *C){
+    // iter = 128 * 64 / 128
+    for(int i=0;i<64;i++){
+        int tileIdx = threadIdx.x*64 + i;
+        int rowC = tileIdx / 64 + blockIdx.y * 128;
+        int colC = tileIdx % 64 + blockIdx.x * 64;
+
+        C[tileIdx] =  rowC<arg.problem_size.m()&&colC<arg.problem_size.n() ? arg.C[rowC*arg.problem_size.n()+colC] : ElementOutput(0);
     }
 }
 
-template<int NWARP_X=2,int NWARP_Y=2>
-__device__ void loadtileB(MMAarguments &arg,ElementInputB *tileB,int idx){
-    const int nrow = K;
-    const int ncol = NWARP_X * N;
-    const int size = nrow * ncol;
-    const int iter = (size+blockDim.x-1) / blockDim.x;
-    // CUTLASS_PRAGMA_UNROLL
-    for(int i=0;i<iter;i++){
-        int tileIdx = threadIdx.x*iter + i;
-        if(tileIdx>=size)return;
-        int rowB = idx*nrow + tileIdx%nrow ;
-        int colB = blockIdx.y*ncol + tileIdx/nrow ;
-        tileB[tileIdx] = rowB<arg.problem_size.k() && colB<arg.problem_size.n() ? arg.B[colB*arg.problem_size.k()+rowB] : ElementInputB(0);
+__device__ void loadtileA(MMAarguments &arg,ElementInputA *A,int idx){
+    // iter = 128 * 8 / 128
+    for(int i=0;i<8;i++){
+        int tileIdx = threadIdx.x*8 + i;
+        int rowA = tileIdx/K + blockIdx.y * 128;
+        int colA = tileIdx%K + idx*K; 
+
+        A[tileIdx] = rowA<arg.problem_size.m()&&colA<arg.problem_size.k() ? arg.A[rowA*arg.problem_size.k()+colA] : ElementInputA(0);
     }
 }
 
-template<int NWARP_X=2,int NWARP_Y=2>
-__device__ void loadtileC(MMAarguments &arg,ElementAccumulator *tileC){
-    const int nrow = NWARP_Y * M;
-    const int ncol = NWARP_X * N; 
-    const int size = nrow * ncol;
-    const int iter = (size+blockDim.x-1) / blockDim.x;
-    // CUTLASS_PRAGMA_UNROLL
-    for(int i=0;i<iter;i++){
-        int tileIdx = threadIdx.x*iter + i;
-        if(tileIdx>=size)return;
-        int rowC = blockIdx.x*nrow + tileIdx/ncol;
-        int colC = blockIdx.y*ncol + tileIdx%ncol;
-        tileC[tileIdx] = rowC<arg.problem_size.m() && colC<arg.problem_size.n() ? arg.C[rowC*arg.problem_size.n()+colC] : ElementAccumulator(0);
+__device__ void loadtileB(MMAarguments &arg,ElementInputB *B,int idx){
+    // iter = 64 * 8 / 128
+    for(int i=0;i<4;i++){
+        int tileIdx = threadIdx.x*4 + i;
+        int rowB = idx*K + tileIdx%K;
+        int colB = blockIdx.x*64 + tileIdx/K;
+
+        B[tileIdx] = rowB<arg.problem_size.k()&&colB<arg.problem_size.n() ? arg.B[colB*arg.problem_size.k()+rowB] : ElementInputB(0);
     }
 }
 
-// template<int NWARP_X=2,int NWARP_Y=2>
-// __device__ void mvtile(MMAarguments &arg,ElementAccumulator *dst,ElementOutput *src){
-//     const int size = NWARP_X*NWARP_Y*M*N;
-//     const int iter = (size+blockDim.x-1) / blockDim.x;
-//     // CUTLASS_PRAGMA_UNROLL
-//     for(int i=0;i<iter;i++){
-//         int tileIdx = threadIdx.x*iter + i;
-//         if(tileIdx>=size)return;
-//         dst[tileIdx] = src[tileIdx]; 
-//     }
-// }
+__device__ void storetile(MMAarguments &arg,ElementOutput *D){
+    // iter = 128 * 64 / 128
+    for(int i=0;i<64;i++){
+        int tileIdx = threadIdx.x*64 + i;
+        int rowD = tileIdx / 64 + blockIdx.y * 128;
+        int colD = tileIdx % 64 + blockIdx.x * 64;
 
+        if(rowD<arg.problem_size.m()&&colD<arg.problem_size.n()){
+            arg.D[rowD*arg.problem_size.n()+colD] = D[tileIdx];
+        }
+    }
+}
 
-template<int NWARP_X=2,int NWARP_Y=2>
-__device__ void mmatile(MMAarguments &arg,ElementInputA *A,ElementInputB *B,ElementAccumulator *C,ElementOutput *D){
+__device__ bool test(int a0,int b0,int a1,int b1){
+    return a0<a1 && b0 < b1;
+}
+
+__device__ void loadtileC_vec(MMAarguments &arg,ElementOutput *C){
+    // iter = 128 * 64 / 128
+    for(int i=0;i<16;i++){
+        int tileIdx = threadIdx.x*64 + i*4;
+        int rowC_0 = tileIdx / 64 + blockIdx.y * 128;
+        int colC_0 = tileIdx % 64 + blockIdx.x * 64;
+        int rowC_1 = (tileIdx+1) / 64 + blockIdx.y * 128;
+        int colC_1 = (tileIdx+1) % 64 + blockIdx.x * 64;
+        int rowC_2 = (tileIdx+2) / 64 + blockIdx.y * 128;
+        int colC_2 = (tileIdx+2) % 64 + blockIdx.x * 64;
+        int rowC_3 = (tileIdx+3) / 64 + blockIdx.y * 128;
+        int colC_3 = (tileIdx+3) % 64 + blockIdx.x * 64;
+
+        bool test0 = test(rowC_0,colC_0,arg.problem_size.m(),arg.problem_size.n()); 
+        bool test1 = test(rowC_1,colC_1,arg.problem_size.m(),arg.problem_size.n());
+        bool test2 = test(rowC_2,colC_2,arg.problem_size.m(),arg.problem_size.n());
+        bool test3 = test(rowC_3,colC_3,arg.problem_size.m(),arg.problem_size.n());
+
+        if(test0&&test1&&test2&&test3)
+            *reinterpret_cast<float4*>(&C[tileIdx]) = *reinterpret_cast<float4*>(&arg.C[rowC_0*arg.problem_size.n()+colC_0]);
+        else{
+            C[tileIdx]   = test0 ? arg.C[rowC_0*arg.problem_size.n()+colC_0] : ElementOutput(0);
+            C[tileIdx+1] = test1 ? arg.C[rowC_1*arg.problem_size.n()+colC_1] : ElementOutput(0);
+            C[tileIdx+2] = test2 ? arg.C[rowC_2*arg.problem_size.n()+colC_2] : ElementOutput(0);
+            C[tileIdx+3] = test3 ? arg.C[rowC_3*arg.problem_size.n()+colC_3] : ElementOutput(0);
+        }
+    }
+}
+
+__device__ void loadtileA_vec(MMAarguments &arg,ElementInputA *A,int idx){
+    // iter = 128 * 8 / 128
+    for(int i=0;i<2;i++){
+        int tileIdx = threadIdx.x*8 + i*4;
+        int rowA_0 = tileIdx/K + blockIdx.y * 128;
+        int colA_0 = tileIdx%K + idx*K; 
+        int rowA_1 = (tileIdx+1)/K + blockIdx.y * 128;
+        int colA_1 = (tileIdx+1)%K + idx*K; 
+        int rowA_2 = (tileIdx+2)/K + blockIdx.y * 128;
+        int colA_2 = (tileIdx+2)%K + idx*K; 
+        int rowA_3 = (tileIdx+3)/K + blockIdx.y * 128;
+        int colA_3 = (tileIdx+3)%K + idx*K; 
+
+        bool test0 = test(rowA_0,colA_0,arg.problem_size.m(),arg.problem_size.k()); 
+        bool test1 = test(rowA_1,colA_1,arg.problem_size.m(),arg.problem_size.k());
+        bool test2 = test(rowA_2,colA_2,arg.problem_size.m(),arg.problem_size.k());
+        bool test3 = test(rowA_3,colA_3,arg.problem_size.m(),arg.problem_size.k());
+
+        if(test0&&test1&&test2&&test3)
+            *reinterpret_cast<float4*>(&A[tileIdx]) = *reinterpret_cast<float4*>(&arg.A[rowA_0*arg.problem_size.k()+colA_0]);
+        else{
+            A[tileIdx]   = test0 ? arg.A[rowA_0*arg.problem_size.k()+colA_0] : ElementInputA(0);
+            A[tileIdx+1] = test1 ? arg.A[rowA_1*arg.problem_size.k()+colA_1] : ElementInputA(0);
+            A[tileIdx+2] = test2 ? arg.A[rowA_2*arg.problem_size.k()+colA_2] : ElementInputA(0);
+            A[tileIdx+3] = test3 ? arg.A[rowA_3*arg.problem_size.k()+colA_3] : ElementInputA(0);
+        }
+    }
+}
+
+__device__ void loadtileB_vec(MMAarguments &arg,ElementInputB *B,int idx){
+    // iter = 64 * 8 / 128
+    for(int i=0;i<1;i++){
+        int tileIdx = threadIdx.x*4 + i*4;
+        int rowB_0 = idx*K + tileIdx%K;
+        int colB_0 = blockIdx.x*64 + tileIdx/K;
+        int rowB_1 = idx*K + (tileIdx+1)%K;
+        int colB_1 = blockIdx.x*64 + (tileIdx+1)/K;
+        int rowB_2 = idx*K + (tileIdx+2)%K;
+        int colB_2 = blockIdx.x*64 + (tileIdx+2)/K;
+        int rowB_3 = idx*K + (tileIdx+3)%K;
+        int colB_3 = blockIdx.x*64 + (tileIdx+3)/K;
+
+        bool test0 = test(rowB_0,colB_0,arg.problem_size.k(),arg.problem_size.n()); 
+        bool test1 = test(rowB_1,colB_1,arg.problem_size.k(),arg.problem_size.n());
+        bool test2 = test(rowB_2,colB_2,arg.problem_size.k(),arg.problem_size.n());
+        bool test3 = test(rowB_3,colB_3,arg.problem_size.k(),arg.problem_size.n());
+
+        if(test0&&test1&&test2&&test3)
+            *reinterpret_cast<float4*>(&B[tileIdx]) = *reinterpret_cast<float4*>(&arg.B[colB_0*arg.problem_size.k()+rowB_0]);
+        else{
+            B[tileIdx]   = test0 ? arg.B[colB_0*arg.problem_size.k()+rowB_0] : ElementInputB(0);
+            B[tileIdx+1] = test1 ? arg.B[colB_1*arg.problem_size.k()+rowB_1] : ElementInputB(0);
+            B[tileIdx+2] = test2 ? arg.B[colB_2*arg.problem_size.k()+rowB_2] : ElementInputB(0);
+            B[tileIdx+3] = test3 ? arg.B[colB_3*arg.problem_size.k()+rowB_3] : ElementInputB(0);
+        }
+    }
+}
+
+__device__ void storetile_vec(MMAarguments &arg,ElementOutput *D){
+    // iter = 128 * 64 / 128
+    for(int i=0;i<16;i++){
+        int tileIdx = threadIdx.x*64 + i*4;
+        int rowD_0 = tileIdx / 64 + blockIdx.y * 128;
+        int colD_0 = tileIdx % 64 + blockIdx.x * 64;
+        int rowD_1 = (tileIdx+1) / 64 + blockIdx.y * 128;
+        int colD_1 = (tileIdx+1) % 64 + blockIdx.x * 64;
+        int rowD_2 = (tileIdx+2) / 64 + blockIdx.y * 128;
+        int colD_2 = (tileIdx+2) % 64 + blockIdx.x * 64;
+        int rowD_3 = (tileIdx+3) / 64 + blockIdx.y * 128;
+        int colD_3 = (tileIdx+3) % 64 + blockIdx.x * 64;
+
+        bool test0 = test(rowD_0,colD_0,arg.problem_size.m(),arg.problem_size.n()); 
+        bool test1 = test(rowD_1,colD_1,arg.problem_size.m(),arg.problem_size.n());
+        bool test2 = test(rowD_2,colD_2,arg.problem_size.m(),arg.problem_size.n());
+        bool test3 = test(rowD_3,colD_3,arg.problem_size.m(),arg.problem_size.n());
+
+        if(test0&&test1&&test2&&test3)
+            *reinterpret_cast<float4*>(&arg.D[rowD_0*arg.problem_size.n()+colD_0]) = *reinterpret_cast<float4*>(&D[tileIdx]);
+        else{
+            if(test0)
+                arg.D[rowD_0*arg.problem_size.n()+colD_0] = D[tileIdx];
+            if(test1)
+                arg.D[rowD_1*arg.problem_size.n()+colD_1] = D[tileIdx+1];
+            if(test2)
+                arg.D[rowD_2*arg.problem_size.n()+colD_2] = D[tileIdx+2];
+            if(test3)
+                arg.D[rowD_3*arg.problem_size.n()+colD_3] = D[tileIdx+3];
+        }
+    }
+}
+
+__device__ void mma_tile(MMAarguments &arg,ElementInputA *A,ElementInputB *B,ElementAccumulator *C,ElementOutput *D){
     const int warpidx = threadIdx.x / 32;
-    const int rowwarp = warpidx / NWARP_X;
-    const int colwarp = warpidx % NWARP_X;
+    const int rowwarp = warpidx / 2;
+    const int colwarp = warpidx % 2;
     const int laneidx = threadIdx.x % 32;
 
     int a[4],b[2],cd[4];
 
-    cd[0] = (rowwarp*M+laneidx/4)*NWARP_X*N+colwarp*N+laneidx%4*2;
-    cd[1] = cd[0] + 1;
-    cd[2] = cd[0] + 8*NWARP_X*N;
-    cd[3] = cd[2] + 1;
+    for(int tileidx=0;tileidx<16;tileidx++){
+        int rowtile = tileidx / 4;
+        int coltile = tileidx % 4;
+        cd[0] = (rowwarp*64+rowtile*M+laneidx/4)*64 + colwarp*32 + coltile*N + laneidx%4*2;
+        cd[1] = cd[0] + 1;
+        cd[2] = cd[0] + 8*64;
+        cd[3] = cd[2] + 1;
 
-    a[0] = (rowwarp*M+laneidx/4)*K+laneidx%4;
-    a[1] = a[0] + 8*K;
-    a[2] = a[0] + 4;
-    a[3] = a[1] + 4;
+        a[0] = (rowwarp*64+rowtile*M+laneidx/4)*K + laneidx%4;
+        a[1] = a[0] + 8*K;
+        a[2] = a[0] + 4;
+        a[3] = a[1] + 4;
 
-    b[0] = (colwarp*N+laneidx/4)*K+laneidx%4;
-    b[1] = b[0] + 4;
+        b[0] = (colwarp*32+coltile*N+laneidx/4)*K + laneidx%4;
+        b[1] = b[0] + 4;
 
-    asm volatile(
-        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
-        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-        : 
-        "=f"(D[cd[0]]),  // D[0]
-        "=f"(D[cd[1]]),  // D[1]
-        "=f"(D[cd[2]]),  // D[2]
-        "=f"(D[cd[3]])   // D[3]
-        : 
-        "r"(*reinterpret_cast<uint32_t const *>(&A[a[0]])),   // A[0]
-        "r"(*reinterpret_cast<uint32_t const *>(&A[a[1]])),   // A[1]
-        "r"(*reinterpret_cast<uint32_t const *>(&A[a[2]])),   // A[2]
-        "r"(*reinterpret_cast<uint32_t const *>(&A[a[3]])),   // A[3]
-        "r"(*reinterpret_cast<uint32_t const *>(&B[b[0]])),   // B[0]
-        "r"(*reinterpret_cast<uint32_t const *>(&B[b[1]])),   // B[1]
-        "f"(C[cd[0]]),   // C[0]
-        "f"(C[cd[1]]),   // C[1]
-        "f"(C[cd[2]]),   // C[2]
-        "f"(C[cd[3]])    // C[3]
-    );
-}
-
-// __device__ void inittileD(ElementOutput *outD){
-//     const int iter = 2*M*2*N / blockdim;
-//     CUTLASS_PRAGMA_UNROLL
-//     for(int i=0;i<iter;i++){
-//         outD[i+threadIdx.x*iter] = 0;
-//     }
-// }
-
-template<int NWARP_X=2,int NWARP_Y=2>
-__device__ void storetile(MMAarguments &arg,ElementOutput *out){
-    const int row = NWARP_Y * M;
-    const int col = NWARP_X * N;
-    const int size = row*col;
-    const int iter = (size+blockDim.x-1)/blockDim.x;
-    // CUTLASS_PRAGMA_UNROLL
-    for(int i=0;i<iter;i++){
-        int tileIdx = threadIdx.x*iter + i;
-        if(tileIdx>=size)return;
-        int rowD = blockIdx.x*row + tileIdx/col;
-        int colD = blockIdx.y*col + tileIdx%col;
-        if(rowD<arg.problem_size.m() && colD<arg.problem_size.n()) {
-            arg.D[rowD*arg.problem_size.n()+colD] = out[tileIdx];
-        }
+        asm volatile(
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
+            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+            : 
+            "=f"(C[cd[0]]),  // D[0]
+            "=f"(C[cd[1]]),  // D[1]
+            "=f"(C[cd[2]]),  // D[2]
+            "=f"(C[cd[3]])   // D[3]
+            : 
+            "r"(*reinterpret_cast<uint32_t const *>(&A[a[0]])),   // A[0]
+            "r"(*reinterpret_cast<uint32_t const *>(&A[a[1]])),   // A[1]
+            "r"(*reinterpret_cast<uint32_t const *>(&A[a[2]])),   // A[2]
+            "r"(*reinterpret_cast<uint32_t const *>(&A[a[3]])),   // A[3]
+            "r"(*reinterpret_cast<uint32_t const *>(&B[b[0]])),   // B[0]
+            "r"(*reinterpret_cast<uint32_t const *>(&B[b[1]])),   // B[1]
+            "f"(C[cd[0]]),   // C[0]
+            "f"(C[cd[1]]),   // C[1]
+            "f"(C[cd[2]]),   // C[2]
+            "f"(C[cd[3]])    // C[3]
+        );
     }
 }
 
@@ -350,59 +438,79 @@ __device__ void printtile(T *arr,int row,int col,bool rowMajor){
     }
 }
 
-// __global__ void GEMM_MMA(MMAarguments arg){
-//     __shared__ ElementInputA tileA[M*2*K]; 
-//     __shared__ ElementInputB tileB[K*N*2]; 
-//     __shared__ ElementOutput tileC[2*M*2*N];
-//     __shared__ ElementOutput tileD[2*M*2*N];
-
-//     const int iters = (arg.problem_size.k() + K - 1) / K;
-
-//     loadtileC(arg,tileC);
-    
-//     for(int idx=0;idx<iters;idx++){
-//         loadtileA(arg,tileA,idx);
-//         loadtileB(arg,tileB,idx);
-//         __syncthreads();
-//         mmatile(arg,tileA,tileB,tileC,tileD);
-//         __syncthreads();
-//         mvtile(arg,tileC,tileD);
-//     }
-//     storetile(arg,tileD);
-// }
-
-template<int NWARP_X=2,int NWARP_Y=2>
 __global__ void GEMM_MMA(MMAarguments arg){
-    __shared__ ElementInputA tileA[NWARP_Y*M * K]; 
-    __shared__ ElementInputB tileB[K * NWARP_X*N]; 
-    __shared__ ElementOutput tileC[NWARP_Y*M * NWARP_X*N];
+    __shared__ ElementInputA tileA[128*8];
+    __shared__ ElementInputB tileB[8*64];
+    __shared__ ElementOutput tileC[128*64];
 
     const int iters = (arg.problem_size.k() + K - 1) / K;
-
-    loadtileC<NWARP_X,NWARP_Y>(arg,tileC);
     
-    for(int idx=0;idx<iters;idx++){
-        loadtileA<NWARP_X,NWARP_Y>(arg,tileA,idx);
-        loadtileB<NWARP_X,NWARP_Y>(arg,tileB,idx);
+    loadtileC(arg,tileC);
+    
+    for(int i=0;i<iters;i++){
+        loadtileA(arg,tileA,i);
+        loadtileB(arg,tileB,i);
+
         __syncthreads();
-        mmatile<NWARP_X,NWARP_Y>(arg,tileA,tileB,tileC,tileC);
+        mma_tile(arg,tileA,tileB,tileC,tileC);
         __syncthreads();
     }
-    storetile<NWARP_X,NWARP_Y>(arg,tileC);
+
+    storetile(arg,tileC);
 }
 
-template<int NWARP_X=2,int NWARP_Y=2>
-void launch_GEMM_MMA(MMAarguments arg){
+__global__ void GEMM_MMA_vec(MMAarguments arg){
+    __shared__ ElementInputA tileA[128*8];
+    __shared__ ElementInputB tileB[8*64];
+    __shared__ ElementOutput tileC[128*64];
+
+    const int iters = (arg.problem_size.k() + K - 1) / K;
+    
+    loadtileC_vec(arg,tileC);
+
+    for(int i=0;i<iters;i++){
+        loadtileA_vec(arg,tileA,i);
+        loadtileB_vec(arg,tileB,i);
+        __syncthreads();
+        mma_tile(arg,tileA,tileB,tileC,tileC);
+        __syncthreads();
+    }
+
+    storetile_vec(arg,tileC);
+}
+
+void launch_GEMM_MMA(MMAarguments &arg){
     dim3 grid,block;
-    grid.x = (arg.problem_size.m()+M*NWARP_Y-1)/(M*NWARP_Y);
-    grid.y = (arg.problem_size.n()+N*NWARP_X-1)/(N*NWARP_X);
+    // threadblockShape 128 64 8
+    // warpShape 64 32 8
+    // every block has 4 warps
+
+    grid.x = (arg.problem_size.n()+64-1)/64;
+    grid.y = (arg.problem_size.m()+128-1)/128;
     grid.z = 1;
 
-    block.x = NWARP_X * NWARP_Y * 32;
+    block.x = 128;
     block.y = 1;
     block.z = 1;
 
-    GEMM_MMA<NWARP_X,NWARP_Y><<<grid,block>>>(arg);
+    GEMM_MMA<<<grid,block>>>(arg);
+}
+
+void launch_GEMM_MMA_vec(MMAarguments &arg){
+    dim3 grid,block;
+    // threadblockShape 128 64 8
+    // warpShape 64 32 8
+    // every block has 4 warps
+
+    grid.x = (arg.problem_size.n()+64-1)/64;
+    grid.y = (arg.problem_size.m()+128-1)/128;
+    grid.z = 1;
+
+    block.x = 128;
+    block.y = 1;
+    block.z = 1;
+
+    GEMM_MMA_vec<<<grid,block>>>(arg);
 }
 
 // Create a tuple of problem size for matrix multiplication
@@ -415,25 +523,6 @@ cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c;  // <- Create matrix 
 cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d;  
 
 GpuTimer timer;
-
-template<int i,int j>
-void launch_GEMM_MMA_i_j(){
-    cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_mma_d(problem_size.mn());
-    std::string name_kernel = "MMA_" + std::to_string(i) + "_" + std::to_string(j);
-    std::string name_test = "cutlassMMA==MMA_" + std::to_string(i) + "_" + std::to_string(j);
-    timer.bind_run(name_kernel,[&]{
-        MMAarguments mmaArg{
-            problem_size,
-            tensor_a.device_data(),
-            tensor_b.device_data(),
-            tensor_c.device_data(),
-            tensor_mma_d.device_data()
-        };
-        launch_GEMM_MMA<i,j>(mmaArg);
-    });
-    
-    timer.testEqual<ElementOutput,LayoutOutput>(name_test,tensor_d,tensor_mma_d);
-}
 
 int main(int argc,char **argv){
     //////////////////////////INIT////////////////////////////////
@@ -476,7 +565,7 @@ int main(int argc,char **argv){
     );
 
     ////////////////////cutlassMMA////////////////////////////////
-
+  #if ENABLE_CUTLASS
     timer.bind_run("cutlassMMA",[&]{
         // Initialize alpha and beta for dot product computation
         ElementComputeEpilogue alpha = ElementComputeEpilogue(1);
@@ -516,24 +605,47 @@ int main(int argc,char **argv){
         status = gemm_op();
         CUTLASS_CHECK(status);
     });
+  #endif
+    //////////////////////GEMM_MMA///////////////////////
+    {   
+        #if ENABLE_CUTLASS
+        cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_mma_d(problem_size.mn());
+        #endif
 
-    //////////////////////GEMM_MMA_i_j///////////////////////
+        timer.bind_run("MMA_base",[&]{
+            MMAarguments mmaArg{
+                problem_size,
+                tensor_a.device_data(),
+                tensor_b.device_data(),
+                tensor_c.device_data(),
+                #if ENABLE_CUTLASS
+                tensor_mma_d.device_data()
+                #else
+                tensor_d.device_data()
+                #endif
+            };
+            launch_GEMM_MMA(mmaArg);
+        });
+        
+        #if ENABLE_CUTLASS
+        timer.testEqual<ElementOutput,LayoutOutput>("MMA_base==ref",tensor_d,tensor_mma_d);
+        #endif
+    }
+
     {
-        launch_GEMM_MMA_i_j<1,1>();
-        launch_GEMM_MMA_i_j<1,2>();
-        launch_GEMM_MMA_i_j<1,3>();
-        launch_GEMM_MMA_i_j<1,4>();
-        launch_GEMM_MMA_i_j<2,1>();
-        launch_GEMM_MMA_i_j<2,2>();
-        launch_GEMM_MMA_i_j<2,3>();
-        launch_GEMM_MMA_i_j<2,4>();
-        launch_GEMM_MMA_i_j<3,1>();
-        launch_GEMM_MMA_i_j<3,2>();
-        launch_GEMM_MMA_i_j<3,3>();
-        launch_GEMM_MMA_i_j<3,4>();
-        launch_GEMM_MMA_i_j<4,1>();
-        launch_GEMM_MMA_i_j<4,2>();
-        launch_GEMM_MMA_i_j<4,3>();
-        launch_GEMM_MMA_i_j<4,4>(); 
+        cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_mma_d(problem_size.mn());
+
+        timer.bind_run("MMA_vec",[&]{
+            MMAarguments mmaArg{
+                problem_size,
+                tensor_a.device_data(),
+                tensor_b.device_data(),
+                tensor_c.device_data(),
+                tensor_mma_d.device_data()
+            };
+            launch_GEMM_MMA_vec(mmaArg);
+        });
+        
+        timer.testEqual<ElementOutput,LayoutOutput>("MMA_vec==ref",tensor_d,tensor_mma_d);
     }
 }
