@@ -39,11 +39,11 @@ STS.128 [R17], R8 ;
 ## 结果
 
 ```
-[        problem size] (5120,4096,4096)
-[          cutlassMMA] Runtime: 2.412237(ms) Gflops: 71219.666177
-[            MMA_base] Runtime: 73.289726(ms) Gflops: 2344.103336
+[        problem size] (8192,8192,8192)
+[          cutlassMMA] Runtime: 15.816908(ms) Gflops: 69514.954246
+[            MMA_base] Runtime: 460.150970(ms) Gflops: 2389.458457
 [       MMA_base==ref] PASS
-[             MMA_vec] Runtime: 53.049061(ms) Gflops: 3238.486962
+[             MMA_vec] Runtime: 333.618652(ms) Gflops: 3295.713894
 [        MMA_vec==ref] PASS
 ```
 
