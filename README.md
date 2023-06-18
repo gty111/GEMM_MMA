@@ -29,7 +29,7 @@ ld.global.v4.u32 {%r161, %r162, %r163, %r164}, [%rd5];
 st.shared.v4.u32 [%r16], {%r161, %r162, %r163, %r164};
 ```
 
-### SASS levle
+### SASS level
 
 ```
 LDG.E.128 R8, [R10.64] ;
