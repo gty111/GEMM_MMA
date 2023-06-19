@@ -120,8 +120,8 @@ struct GpuTimer
         else {
             std::printf("[%20s] FAIL\n",name.c_str());
             if(ifprint){
-                std::cout << "[a]:\n" << a.host_view() << std::endl;
-                std::cout << "[b]:\n" << b.host_view() << std::endl;
+                // std::cout << "[a]:\n" << a.host_view() << std::endl;
+                // std::cout << "[b]:\n" << b.host_view() << std::endl;
                 cutlass::reference::host::TensorSub<E,L,E,L,E,L>(a.host_view(),b.host_ref());
                 std::cout << "diff:\n" << a.host_view() << std::endl;
             }
@@ -231,41 +231,7 @@ __device__ bool test(int a0,int b0,int a1,int b1){
     return a0<a1 && b0 < b1;
 }
 
-__device__ void loadtileC(MMAarguments &arg,ElementOutput *C){
-    // iter = 128 * 64 / 128
-    for(int i=0;i<16;i++){
-        int tileIdx = threadIdx.x*4 + i*blockDim.x*4;
-        int rowC_0 = tileIdx / 64 + blockIdx.y * 128;
-        int colC_0 = tileIdx % 64 + blockIdx.x * 64;
-        int rowC_1 = (tileIdx+1) / 64 + blockIdx.y * 128;
-        int colC_1 = (tileIdx+1) % 64 + blockIdx.x * 64;
-        int rowC_2 = (tileIdx+2) / 64 + blockIdx.y * 128;
-        int colC_2 = (tileIdx+2) % 64 + blockIdx.x * 64;
-        int rowC_3 = (tileIdx+3) / 64 + blockIdx.y * 128;
-        int colC_3 = (tileIdx+3) % 64 + blockIdx.x * 64;
-
-        bool test0 = test(rowC_0,colC_0,arg.problem_size.m(),arg.problem_size.n()); 
-        bool test1 = test(rowC_1,colC_1,arg.problem_size.m(),arg.problem_size.n());
-        bool test2 = test(rowC_2,colC_2,arg.problem_size.m(),arg.problem_size.n());
-        bool test3 = test(rowC_3,colC_3,arg.problem_size.m(),arg.problem_size.n());
-
-        if(test0&&test1&&test2&&test3){
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((uint32_t)__cvta_generic_to_shared(&C[tileIdx])),
-                "l"(&arg.C[rowC_0*arg.problem_size.n()+colC_0]),
-                "n"(16)
-            );
-            asm("cp.async.commit_group;\n"::);
-        }else{
-            C[tileIdx]   = test0 ? arg.C[rowC_0*arg.problem_size.n()+colC_0] : ElementOutput(0);
-            C[tileIdx+1] = test1 ? arg.C[rowC_1*arg.problem_size.n()+colC_1] : ElementOutput(0);
-            C[tileIdx+2] = test2 ? arg.C[rowC_2*arg.problem_size.n()+colC_2] : ElementOutput(0);
-            C[tileIdx+3] = test3 ? arg.C[rowC_3*arg.problem_size.n()+colC_3] : ElementOutput(0);
-        }
-    }
-}
-
-__device__ void loadtileC_tune(MMAarguments &arg,ElementOutput *C_fragemnt){
+__device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt){
     const int warpidx = threadIdx.x / 32;
     const int laneidx = threadIdx.x % 32;
     const int rowwarp = warpidx / 2;
@@ -357,40 +323,7 @@ __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,int idx){
     }
 }
 
-__device__ void storetile(MMAarguments &arg,ElementOutput *D){
-    // iter = 128 * 64 / 128
-    for(int i=0;i<16;i++){
-        int tileIdx = threadIdx.x*4 + i*blockDim.x*4;
-        int rowD_0 = tileIdx / 64 + blockIdx.y * 128;
-        int colD_0 = tileIdx % 64 + blockIdx.x * 64;
-        int rowD_1 = (tileIdx+1) / 64 + blockIdx.y * 128;
-        int colD_1 = (tileIdx+1) % 64 + blockIdx.x * 64;
-        int rowD_2 = (tileIdx+2) / 64 + blockIdx.y * 128;
-        int colD_2 = (tileIdx+2) % 64 + blockIdx.x * 64;
-        int rowD_3 = (tileIdx+3) / 64 + blockIdx.y * 128;
-        int colD_3 = (tileIdx+3) % 64 + blockIdx.x * 64;
-
-        bool test0 = test(rowD_0,colD_0,arg.problem_size.m(),arg.problem_size.n()); 
-        bool test1 = test(rowD_1,colD_1,arg.problem_size.m(),arg.problem_size.n());
-        bool test2 = test(rowD_2,colD_2,arg.problem_size.m(),arg.problem_size.n());
-        bool test3 = test(rowD_3,colD_3,arg.problem_size.m(),arg.problem_size.n());
-
-        if(test0&&test1&&test2&&test3)
-            *reinterpret_cast<float4*>(&arg.D[rowD_0*arg.problem_size.n()+colD_0]) = *reinterpret_cast<float4*>(&D[tileIdx]);
-        else{
-            if(test0)
-                arg.D[rowD_0*arg.problem_size.n()+colD_0] = D[tileIdx];
-            if(test1)
-                arg.D[rowD_1*arg.problem_size.n()+colD_1] = D[tileIdx+1];
-            if(test2)
-                arg.D[rowD_2*arg.problem_size.n()+colD_2] = D[tileIdx+2];
-            if(test3)
-                arg.D[rowD_3*arg.problem_size.n()+colD_3] = D[tileIdx+3];
-        }
-    }
-}
-
-__device__ void storetile_tune(MMAarguments &arg,ElementOutput *C_fragment){
+__device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment){
     const int warpidx = threadIdx.x / 32;
     const int laneidx = threadIdx.x % 32;
     const int rowwarp = warpidx / 2;
@@ -418,54 +351,7 @@ __device__ void storetile_tune(MMAarguments &arg,ElementOutput *C_fragment){
     }
 }
 
-__device__ void mma_tile(MMAarguments &arg,ElementInputA *A,ElementInputB *B,ElementAccumulator *C,ElementOutput *D){
-    const int warpidx = threadIdx.x / 32;
-    const int rowwarp = warpidx / 2;
-    const int colwarp = warpidx % 2;
-    const int laneidx = threadIdx.x % 32;
-
-    int a[4],b[2],cd[4];
-
-    for(int tileidx=0;tileidx<16;tileidx++){
-        int rowtile = tileidx / 4;
-        int coltile = tileidx % 4;
-        cd[0] = (rowwarp*64+rowtile*M+laneidx/4)*64 + colwarp*32 + coltile*N + laneidx%4*2;
-        cd[1] = cd[0] + 1;
-        cd[2] = cd[0] + 8*64;
-        cd[3] = cd[2] + 1;
-
-        a[0] = (rowwarp*64+rowtile*M+laneidx/4)*K + laneidx%4;
-        a[1] = a[0] + 8*K;
-        a[2] = a[0] + 4;
-        a[3] = a[1] + 4;
-
-        b[0] = (colwarp*32+coltile*N+laneidx/4)*K + laneidx%4;
-        b[1] = b[0] + 4;
-
-        asm volatile(
-            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
-            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-            : 
-            "=f"(C[cd[0]]),  // D[0]
-            "=f"(C[cd[1]]),  // D[1]
-            "=f"(C[cd[2]]),  // D[2]
-            "=f"(C[cd[3]])   // D[3]
-            : 
-            "r"(*reinterpret_cast<uint32_t const *>(&A[a[0]])),   // A[0]
-            "r"(*reinterpret_cast<uint32_t const *>(&A[a[1]])),   // A[1]
-            "r"(*reinterpret_cast<uint32_t const *>(&A[a[2]])),   // A[2]
-            "r"(*reinterpret_cast<uint32_t const *>(&A[a[3]])),   // A[3]
-            "r"(*reinterpret_cast<uint32_t const *>(&B[b[0]])),   // B[0]
-            "r"(*reinterpret_cast<uint32_t const *>(&B[b[1]])),   // B[1]
-            "f"(C[cd[0]]),   // C[0]
-            "f"(C[cd[1]]),   // C[1]
-            "f"(C[cd[2]]),   // C[2]
-            "f"(C[cd[3]])    // C[3]
-        );
-    }
-}
-
-__device__ void mma_tile_tune(MMAarguments &arg,ElementInputA *A,ElementInputB *B,ElementOutput *C_fragment){
+__device__ void mma_tile(MMAarguments &arg,ElementInputA *A,ElementInputB *B,ElementOutput *C_fragment){
     const int warpidx = threadIdx.x / 32;
     const int rowwarp = warpidx / 2;
     const int colwarp = warpidx % 2;
@@ -511,22 +397,23 @@ __device__ void mma_tile_tune(MMAarguments &arg,ElementInputA *A,ElementInputB *
 __global__ void GEMM_MMA(MMAarguments arg){
     __shared__ ElementInputA tileA[128*8];
     __shared__ ElementInputB tileB[8*64];
-    __shared__ ElementOutput tileC[128*64];
+
+    ElementOutput C_fragment[64];
 
     const int iters = (arg.problem_size.k() + K - 1) / K;
     
-    loadtileC(arg,tileC);
+    loadtileC(arg,C_fragment);
 
     for(int i=0;i<iters;i++){
         loadtileA(arg,tileA,i);
         loadtileB(arg,tileB,i);
         asm("cp.async.wait_all;\n"::);
         __syncthreads();
-        mma_tile(arg,tileA,tileB,tileC,tileC);
+        mma_tile(arg,tileA,tileB,C_fragment);
         __syncthreads();
     }
-    
-    storetile(arg,tileC);
+
+    storetile(arg,C_fragment);
 }
 
 void launch_GEMM_MMA(MMAarguments &arg){
@@ -547,25 +434,33 @@ void launch_GEMM_MMA(MMAarguments &arg){
 }
 
 __global__ void GEMM_MMA_tune(MMAarguments arg){
-    __shared__ ElementInputA tileA[128*8];
-    __shared__ ElementInputB tileB[8*64];
+    __shared__ ElementInputA tileA[2][128*8];
+    __shared__ ElementInputB tileB[2][8*64];
 
     ElementOutput C_fragment[64];
 
     const int iters = (arg.problem_size.k() + K - 1) / K;
     
-    loadtileC_tune(arg,C_fragment);
+    loadtileC(arg,C_fragment);
+
+    loadtileA(arg,tileA[0],0);
+    loadtileB(arg,tileB[0],0);
 
     for(int i=0;i<iters;i++){
-        loadtileA(arg,tileA,i);
-        loadtileB(arg,tileB,i);
-        asm("cp.async.wait_all;\n"::);
-        __syncthreads();
-        mma_tile_tune(arg,tileA,tileB,C_fragment);
-        __syncthreads();
+        if(i+1<iters){
+            asm("cp.async.wait_all;\n"::);
+            __syncthreads();
+            mma_tile(arg,tileA[i%2],tileB[i%2],C_fragment);
+            loadtileA(arg,tileA[1-i%2],i+1);
+            loadtileB(arg,tileB[1-i%2],i+1);
+        }else{
+            asm("cp.async.wait_all;\n"::);
+            __syncthreads();
+            mma_tile(arg,tileA[i%2],tileB[i%2],C_fragment);
+        }
     }
 
-    storetile_tune(arg,C_fragment);
+    storetile(arg,C_fragment);
 }
 
 void launch_GEMM_MMA_tune(MMAarguments &arg){
