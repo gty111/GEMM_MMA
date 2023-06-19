@@ -2,7 +2,7 @@
 
 GEMM MMA 构建了一个初级的GEMM kernel， 它使用CUDA `mma.sync`指令来使用GPU tensor core单元，并对比了和cutlass算子的性能，本例主要为了介绍使用 `mma.sync` 构建一个完整的GEMM kernel，性能还有很大的优化空间。
 
-ldgsts 分支主要来介绍使用Ampere引入的异步拷贝来优化性能
+reg 分支介绍使用寄存器来优化性能
 
 ## 总体思路
 
@@ -11,63 +11,29 @@ ldgsts 分支主要来介绍使用Ampere引入的异步拷贝来优化性能
 
 上图展示了GEMM MMA的计算流程，蓝色部分代表1个block要计算的部分，蓝色部分下的每个小方块代表每个warp的计算部分，右侧青色部分代表每个warp的计算部分，青色部分下的每个小方块代表tensor core支持的分块大小，在调用tensor core之前，加载一个绿色方块和红色方块进入共享内存，之后每个warp独立同步地调用`mma.sync` 来计算每个分块的结果，其中 $M'$ $N'$ $K'$ 代表tensor core单元支持计算的GEMM维度。
 
-## 异步拷贝
+## CUDA中的寄存器
 
-CUDA 11 includes a new asynchronous copy (async copy) API to take advantage of the A100 
-GPU’s hardware-accelerated direct-copy-to-shared functionality. Async copy performs an 
-asynchronous (non-blocking) direct memory transfer from global memory to shared memory, 
-bypassing the SM threads and combining the functions of separate “load from global memory 
-into a register”, and “write to shared memory from a register” operations into a single, efficient 
-operation. 
+寄存器的概念可能对于高级编程者来说是比较陌生的，因为在编程中一般并不会刻意地声明要使用寄存器来做什么操作，因为编译器会帮我们处理好这个问题，这就导致了在编写CUDA算子时往往会忽略掉寄存器的使用，可以通过ncu或编译时设置编译参数来查看kernel中每个线程使用了几个寄存器，比如在我们对比的cutlass的kernel中每个线程使用了230个寄存器，但是本例中baseline的kernel中每个线程只使用了32个寄存器，所以可以考虑将频繁使用的`tileC`(也就是图中的蓝色部分)从共享内存转移到寄存器中。
 
-Async copy eliminates the need for intermediate staging of data through the register file (RF), 
-reducing register file bandwidth. It also efficiently uses memory bandwidth and reduces power 
-consumption. As the name implies, async copy works asynchronously, allowing other 
-computations to occur during global-to-shared memory copies. Async copy is able to notify the 
-program of copy completion via the GPU’s new barrier feature.
+如何使用寄存器？其实很简单，在kernel中声明变量或数组就可以(不过如果一个线程使用太多寄存器会发生register spilling，可以在编译好程序后反汇编查看下有没有local memory)
 
-Bypassing L1 and the register file can significantly accelerate memory copy performance, 
-especially for multiple successive async-copy operations that copy large amounts of data from 
-global to shared memory. 
-
-![](pic/async_copy.png)
-
-Two variants of the async copy instruction are available for different usage scenarios. BYPASS, 
-which bypasses L1 cache and the register file as described above, and ACCESS which saves 
-data to L1 for subsequent accesses and reuse. 
-
-### cu level
-
+在代码中添加了
 ```
-asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((uint32_t)__cvta_generic_to_shared(&C[tileIdx])),
-                "l"(&arg.C[rowC_0*arg.problem_size.n()+colC_0]),
-                "n"(16)
-            );
+ElementOutput C_fragment[64];
 ```
-
-### ptx level
-
-```
-cp.async.cg.shared.global [%r158], [%rd18], 16;
-```
-
-### SASS level
-
-```
-LDGSTS.E.BYPASS.128 [R7+0x1800], [R4.64] ;
-```
-
+并修改好相关逻辑后，再次编译发现每个线程使用了156个线程
 
 ## 结果
 
+原来没有使用寄存器才是kernel性能差的主要原因...
+
 ```
 [        problem size] (8192,8192,8192)
-[          cutlassMMA] Runtime: 15.938765(ms) Gflops: 68983.491336
-[            MMA_base] Runtime: 315.683228(ms) Gflops: 3482.958649
+[          cutlassMMA] Runtime: 16.149094(ms) Gflops: 68085.036418
+[            MMA_base] Runtime: 297.333862(ms) Gflops: 3697.902483
 [       MMA_base==ref] PASS
-[            MMA_ldgsts] Runtime: 297.315948(ms) Gflops: 3698.125289
-[       MMA_ldgsts==ref] PASS
+[            MMA_tune] Runtime: 45.636402(ms) Gflops: 24092.863952
+[       MMA_tune==ref] PASS
 ```
 
 
