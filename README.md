@@ -2,17 +2,33 @@
 
 GEMM MMA 构建了一个初级的GEMM kernel， 它使用CUDA `mma.sync`指令来使用GPU tensor core单元，并对比了和cutlass算子的性能，本例主要为了介绍使用 `mma.sync` 构建一个完整的GEMM kernel，性能还有很大的优化空间。
 
-## [切换到vector分支](https://github.com/gty111/GEMM_MMA/tree/vector)
+## Optimize GEMM step by step
 
-vector分支主要介绍向量化load/store
+baseline性能: 3.44% (相比cutlass)
 
-## [切换到bfco分支](https://github.com/gty111/GEMM_MMA/tree/bfco)
+### [1. 使用向量化(vector)](https://github.com/gty111/GEMM_MMA/tree/vector)
+
+vector分支主要介绍向量化load/store，
+
+优化后性能: 4.74%
+
+### [2. 避免bank冲突并且合并访存(bfco)](https://github.com/gty111/GEMM_MMA/tree/bfco)
 
 bfco分支主要介绍如何通过解决shared memory bank conflict 和 memory coalesce (访存合并) 来优化性能
 
-## [切换到ldgsts分支](https://github.com/gty111/GEMM_MMA/tree/ldgsts)
+优化后性能: 5.00%
+
+### [3. 使用异步拷贝(ldgsts)](https://github.com/gty111/GEMM_MMA/tree/ldgsts)
 
 ldgsts 分支主要来介绍使用Ampere引入的异步拷贝来优化性能
+
+优化后性能: 5.36%
+
+### [4. 使用寄存器(reg)](https://github.com/gty111/GEMM_MMA/tree/reg)
+
+reg 分支介绍使用寄存器来优化性能
+
+优化后性能: 35.39%
 
 ## 总体思路
 
