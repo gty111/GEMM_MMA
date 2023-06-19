@@ -30,6 +30,12 @@ reg 分支介绍使用寄存器来优化性能
 
 优化后性能: 35.39%
 
+### [5. 使用数据预取(prefetch)](https://github.com/gty111/GEMM_MMA/tree/prefetch)
+
+prefetch 分支介绍使用数据预取来优化性能
+
+优化后性能：39.36%
+
 ## 总体思路
 
 <img src="pic/gemm_mma.png" title="" alt="" width="491">
