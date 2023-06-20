@@ -4,6 +4,8 @@ GEMM MMA 构建了一个初级的GEMM kernel， 它使用CUDA `mma.sync`指令�
 
 ## Optimize GEMM step by step
 
+一步步优化GEMM系列，每次引入一个优化概念并对比性能变化，代码在每个分支的`gemm.cu`
+
 baseline性能: 3.44% (相比cutlass)
 
 ### [1. 使用向量化(vector)](https://github.com/gty111/GEMM_MMA/tree/vector)
