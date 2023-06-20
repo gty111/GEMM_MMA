@@ -36,6 +36,10 @@ prefetch 分支介绍使用数据预取来优化性能
 
 优化后性能：39.36%
 
+### [6. 关于PTXAS有趣的发现(ptxas)](https://github.com/gty111/GEMM_MMA/tree/ptxas)
+
+ptxas 分支分享一个调优过程中发现的关于ptxas(ptx汇编器)有意思的东西
+
 ## 总体思路
 
 <img src="pic/gemm_mma.png" title="" alt="" width="491">
