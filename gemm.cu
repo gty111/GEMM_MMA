@@ -394,134 +394,6 @@ __device__ void mma_tile(MMAarguments &arg,ElementInputA *A,ElementInputB *B,Ele
     }
 }
 
-__device__ void mma_tile_tune(
-    MMAarguments &arg,
-    ElementInputA *A,
-    ElementInputB *B,
-    ElementInputA *A_fragment,
-    ElementInputB *B_fragment,
-    ElementOutput *C_fragment
-)
-{
-    const int warpidx = threadIdx.x / 32;
-    const int rowwarp = warpidx / 2;
-    const int colwarp = warpidx % 2;
-    const int laneidx = threadIdx.x % 32;
-
-    int a[4],b[2];
-
-    /* 
-        Each Tile of C/D calculated by per warp is divided into four big Tiles(2x2),
-        Before calculating each big tile, 
-        corresponding tile of A and B will be transfered from shared memory to registers.
-        We will iterate each big Tile in the following order:
-        [x][ ]   =>  [ ][x]  =>  [ ][ ]  =>  [ ][ ]
-        [ ][ ]   =>  [ ][ ]  =>  [ ][x]  =>  [x][ ]
-        Thus we can reuse one tile of A/B instead of loading tile of A and B each time.
-    */
-
-    const int rowIdx[] = {0,0,1,1};
-    const int colIdx[] = {0,1,1,0};
-
-    // iterate each big Tile
-    for(int Tileidx=0;Tileidx<4;Tileidx++){
-
-        const int rowTile = rowIdx[Tileidx];
-        const int colTile = colIdx[Tileidx];
-
-        // load tile of A/B from shared memory to registers
-        if(Tileidx==0){
-            a[0] = (rowwarp*64+laneidx/4)*K + laneidx%4;
-            a[1] = a[0] + 8*K;
-            a[2] = a[0] + 4;
-            a[3] = a[1] + 4;
-
-            b[0] = (colwarp*32+laneidx/4)*K + laneidx%4;
-            b[1] = b[0] + 4;
-
-            A_fragment[0] = A[a[0]];
-            A_fragment[1] = A[a[1]];
-            A_fragment[2] = A[a[2]];
-            A_fragment[3] = A[a[3]];
-
-            A_fragment[4] = A[a[0]+M*K];
-            A_fragment[5] = A[a[1]+M*K];
-            A_fragment[6] = A[a[2]+M*K];
-            A_fragment[7] = A[a[3]+M*K];
-
-            B_fragment[0] = B[b[0]];
-            B_fragment[1] = B[b[1]];
-
-            B_fragment[2] = B[b[0]+K*N];
-            B_fragment[3] = B[b[1]+K*N];
- 
-        }else if(Tileidx==1){
-            b[0] = (colwarp*32+2*N+laneidx/4)*K + laneidx%4;
-            b[1] = b[0] + 4;
-
-            B_fragment[0] = B[b[0]];
-            B_fragment[1] = B[b[1]];
-
-            B_fragment[2] = B[b[0]+K*N];
-            B_fragment[3] = B[b[1]+K*N];
-        }else if(Tileidx==2){
-            a[0] = (rowwarp*64+2*M+laneidx/4)*K + laneidx%4;
-            a[1] = a[0] + 8*K;
-            a[2] = a[0] + 4;
-            a[3] = a[1] + 4;
-
-            A_fragment[0] = A[a[0]];
-            A_fragment[1] = A[a[1]];
-            A_fragment[2] = A[a[2]];
-            A_fragment[3] = A[a[3]];
-
-            A_fragment[4] = A[a[0]+M*K];
-            A_fragment[5] = A[a[1]+M*K];
-            A_fragment[6] = A[a[2]+M*K];
-            A_fragment[7] = A[a[3]+M*K];
-        }else if(Tileidx==3){
-            b[0] = (colwarp*32+laneidx/4)*K + laneidx%4;
-            b[1] = b[0] + 4;
-
-            B_fragment[0] = B[b[0]];
-            B_fragment[1] = B[b[1]];
-
-            B_fragment[2] = B[b[0]+K*N];
-            B_fragment[3] = B[b[1]+K*N];
-        }
-
-        // iterate each small tile
-        for(int tileidx=0;tileidx<4;tileidx++){
-
-            int rowtile = tileidx / 2;
-            int coltile = tileidx % 2;
-            
-            int cidx = (rowTile*2+rowtile)*4+colTile*2+coltile;
-
-            asm volatile(
-                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
-                "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-                : 
-                "=f"(C_fragment[cidx*4+0]),  // D[0]
-                "=f"(C_fragment[cidx*4+1]),  // D[1]
-                "=f"(C_fragment[cidx*4+2]),  // D[2]
-                "=f"(C_fragment[cidx*4+3])   // D[3]
-                : 
-                "r"(*reinterpret_cast<uint32_t const *>(&A_fragment[rowtile*4+0])),   // A[0]
-                "r"(*reinterpret_cast<uint32_t const *>(&A_fragment[rowtile*4+1])),   // A[1]
-                "r"(*reinterpret_cast<uint32_t const *>(&A_fragment[rowtile*4+2])),   // A[2]
-                "r"(*reinterpret_cast<uint32_t const *>(&A_fragment[rowtile*4+3])),   // A[3]
-                "r"(*reinterpret_cast<uint32_t const *>(&B_fragment[coltile*2+0])),   // B[0]
-                "r"(*reinterpret_cast<uint32_t const *>(&B_fragment[coltile*2+1])),   // B[1]
-                "f"(C_fragment[cidx*4+0]),   // C[0]
-                "f"(C_fragment[cidx*4+1]),   // C[1]
-                "f"(C_fragment[cidx*4+2]),   // C[2]
-                "f"(C_fragment[cidx*4+3])    // C[3]
-            );
-        }
-    }
-}
-
 __global__ void GEMM_MMA(MMAarguments arg){
     __shared__ ElementInputA tileA[2][128*8];
     __shared__ ElementInputB tileB[2][8*64];
@@ -570,12 +442,10 @@ void launch_GEMM_MMA(MMAarguments &arg){
 }
 
 __global__ void GEMM_MMA_tune(MMAarguments arg){
-    __shared__ ElementInputA tileA[2][128*8];
-    __shared__ ElementInputB tileB[2][8*64];
+    __shared__ ElementInputA tileA[3][128*8];
+    __shared__ ElementInputB tileB[3][8*64];
 
     ElementOutput C_fragment[64];
-    ElementInputA A_fragment[8];
-    ElementInputB B_fragment[4];
 
     const int iters = (arg.problem_size.k() + K - 1) / K;
     
@@ -583,19 +453,19 @@ __global__ void GEMM_MMA_tune(MMAarguments arg){
 
     loadtileA(arg,tileA[0],0);
     loadtileB(arg,tileB[0],0);
+    asm("cp.async.commit_group;\n"::);
+
+    loadtileA(arg,tileA[1],1);
+    loadtileB(arg,tileB[1],1);
+    asm("cp.async.commit_group;\n"::);
 
     for(int i=0;i<iters;i++){
-        if(i+1<iters){
-            asm("cp.async.wait_all;\n"::);
-            __syncthreads();
-            mma_tile_tune(arg,tileA[i%2],tileB[i%2],A_fragment,B_fragment,C_fragment);
-            loadtileA(arg,tileA[1-i%2],i+1);
-            loadtileB(arg,tileB[1-i%2],i+1);
-        }else{
-            asm("cp.async.wait_all;\n"::);
-            __syncthreads();
-            mma_tile_tune(arg,tileA[i%2],tileB[i%2],A_fragment,B_fragment,C_fragment);
-        }
+        asm("cp.async.wait_group 1;\n"::);
+        __syncthreads();
+        mma_tile(arg,tileA[i%3],tileB[i%3],C_fragment);
+        loadtileA(arg,tileA[(i+2)%3],i+2);
+        loadtileB(arg,tileB[(i+2)%3],i+2);
+        asm("cp.async.commit_group;\n"::);
     }
 
     storetile(arg,C_fragment);
