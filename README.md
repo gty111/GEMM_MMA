@@ -42,6 +42,12 @@ prefetch 分支介绍使用数据预取来优化性能
 
 ptxas 分支分享一个调优过程中发现的关于ptxas(ptx汇编器)有意思的东西
 
+### [5. 优化数据预取(prefetchx)](https://github.com/gty111/GEMM_MMA/tree/prefetchx)
+
+prefetchx 分支和之前的prefetch分支类似，区别是增加了预取数据大小并利用了同步指令`cp.async.waitgroup N`
+
+优化后性能：46.89%
+
 ## 总体思路
 
 <img src="pic/gemm_mma.png" title="" alt="" width="491">
