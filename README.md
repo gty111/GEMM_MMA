@@ -15,7 +15,7 @@ shape 分支调整了每个block和warp计算的矩阵C的大小
 
 cutlass 中 `ShapeMMAThreadBlock` 代表每个线程块计算的矩阵C的大小，而 `ShapeMMAWarp` 代表每个warp计算的矩阵C的大小
 
-之前手写的 MMA kernel 每个线程块计算 128x64，每个warp计算 64x32，调整后每个线程块计算 128x128，每个warp计算 64x64
+之前手写的 MMA kernel 每个线程块计算 128x64，每个warp计算 64x32，调整后每个线程块计算 128x128，每个warp计算 64x64，这样可以增加数据复用
 
 PS: 实测如果在kernel中申请长度为128的数组，编译器会将其分配到local memory， 所以为了避免这样的情况发生，需要将长度为128的数组分成两个长度为64的数组
 
