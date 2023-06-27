@@ -48,6 +48,12 @@ prefetchx 分支和之前的prefetch分支类似，区别是增加了预取数�
 
 优化后性能：46.89%
 
+### [8. 调整线程块和warp计算的矩阵大小(shape)](https://github.com/gty111/GEMM_MMA/tree/shape)
+
+shape 分支调整了每个block和warp计算的矩阵C的大小
+
+优化后性能：62.39%
+
 ## 总体思路
 
 <img src="pic/gemm_mma.png" title="" alt="" width="491">
