@@ -11,6 +11,8 @@
 #include <iostream>
 #include <functional>
 
+#define DIV(x,y) ((x)+(y)-1)/(y)
+
 /**
  * Panic wrapper for unwinding CUTLASS errors
  */
@@ -197,6 +199,8 @@ const int M = ShapeMMAOp::kM;
 const int N = ShapeMMAOp::kN;
 const int K = ShapeMMAOp::kK;
 
+const int logtile = 2; // for threadblock swizzle
+
 struct MMAarguments{
     cutlass::gemm::GemmCoord problem_size;
     ElementInputA *A;
@@ -206,6 +210,7 @@ struct MMAarguments{
 };
 
 struct Index{
+    int blockIdx_x,blockIdx_y;
     int warpidx;
     int laneidx;
     int rowwarp;
@@ -224,13 +229,16 @@ struct Index{
         rowwarp = warpidx / 2;
         colwarp = warpidx % 2;
 
+        blockIdx_x = blockIdx.x >> logtile;
+        blockIdx_y = (blockIdx.y << logtile) + ((blockIdx.x) & ((1 << (logtile)) - 1));
+
         for(int i=0;i<2;i++){
             tileidx[i] = threadIdx.x*4 + i*blockDim.x*4;
         }
 
         for(int i=0;i<2;i++){
             for(int j=0;j<4;j++){
-                rowA[i][j] = (tileidx[i]+j) / K + blockIdx.y * 128;
+                rowA[i][j] = (tileidx[i]+j) / K + blockIdx_y * 128;
                 colA[i][j] = (tileidx[i]+j) % K;
             }
         }
@@ -238,7 +246,7 @@ struct Index{
         for(int i=0;i<2;i++){
             for(int j=0;j<4;j++){
                 rowB[i][j] = (tileidx[i]+j) % K;
-                colB[i][j] = (tileidx[i]+j) / K + blockIdx.x * 128;
+                colB[i][j] = (tileidx[i]+j) / K + blockIdx_x * 128;
             }
         }
 
@@ -254,7 +262,6 @@ struct Index{
             b[i][1] = b[i][0] + 4;
         }
     }
-
 };
 
 template<typename T>
@@ -282,18 +289,13 @@ __device__ bool test(int a0,int b0,int a1,int b1){
     return a0<a1 && b0 < b1;
 }
 
-__device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOutput *C_fragemnt2){
-    const int warpidx = threadIdx.x / 32;
-    const int laneidx = threadIdx.x % 32;
-    const int rowwarp = warpidx / 2;
-    const int colwarp = warpidx % 2;
-
+__device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOutput *C_fragemnt2,Index &index){
     for(int i=0;i<16;i++){
         int rowtile = i / 8;
         int coltile = i % 8;
         for(int j=0;j<2;j++){
-            int rowC = blockIdx.y*128 + rowwarp*64 + rowtile*16 + laneidx/4 + j*8;
-            int colC = blockIdx.x*128 + colwarp*64 + coltile*8  + laneidx%4*2;
+            int rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8;
+            int colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
             bool test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
             bool test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
@@ -311,8 +313,8 @@ __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOu
         int rowtile = i / 8 + 2;
         int coltile = i % 8;
         for(int j=0;j<2;j++){
-            int rowC = blockIdx.y*128 + rowwarp*64 + rowtile*16 + laneidx/4 + j*8;
-            int colC = blockIdx.x*128 + colwarp*64 + coltile*8  + laneidx%4*2;
+            int rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8;
+            int colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
             bool test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
             bool test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
@@ -327,18 +329,14 @@ __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOu
     }
 }
 
-__device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOutput *C_fragment2){
-    const int warpidx = threadIdx.x / 32;
-    const int laneidx = threadIdx.x % 32;
-    const int rowwarp = warpidx / 2;
-    const int colwarp = warpidx % 2;
+__device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOutput *C_fragment2,Index &index){
     
     for(int i=0;i<16;i++){
         int rowtile = i / 8;
         int coltile = i % 8;
         for(int j=0;j<2;j++){
-            int rowC = blockIdx.y*128 + rowwarp*64 + rowtile*16 + laneidx/4 + j*8 ;
-            int colC = blockIdx.x*128 + colwarp*64 + coltile*8  + laneidx%4*2;
+            int rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8 ;
+            int colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
             bool test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
             bool test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
@@ -358,8 +356,8 @@ __device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOu
         int rowtile = i / 8 + 2;
         int coltile = i % 8;
         for(int j=0;j<2;j++){
-            int rowC = blockIdx.y*128 + rowwarp*64 + rowtile*16 + laneidx/4 + j*8 ;
-            int colC = blockIdx.x*128 + colwarp*64 + coltile*8  + laneidx%4*2;
+            int rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8 ;
+            int colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
             bool test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
             bool test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
@@ -506,6 +504,7 @@ __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
     }
 }
 
+template<int logtile=2>
 __global__ void GEMM_MMA(MMAarguments arg){
     __shared__ ElementInputA tileA[3][128*8];
     __shared__ ElementInputB tileB[3][8*128];
@@ -516,9 +515,9 @@ __global__ void GEMM_MMA(MMAarguments arg){
 
     struct Index index;
 
-    const int iters = (arg.problem_size.k() + K - 1) / K;
+    const int iters = DIV(arg.problem_size.k(),K);
     
-    loadtileC(arg,C_fragment1,C_fragment2);
+    loadtileC(arg,C_fragment1,C_fragment2,index);
 
     loadtileA(arg,tileA[0],index);
     loadtileB(arg,tileB[0],index);
@@ -540,7 +539,7 @@ __global__ void GEMM_MMA(MMAarguments arg){
         asm("cp.async.commit_group;\n"::);
     }
 
-    storetile(arg,C_fragment1,C_fragment2);
+    storetile(arg,C_fragment1,C_fragment2,index);
 }
 
 void launch_GEMM_MMA(MMAarguments &arg){
@@ -549,15 +548,15 @@ void launch_GEMM_MMA(MMAarguments &arg){
     // warpShape 64 64 8
     // every block has 4 warps
 
-    grid.x = (arg.problem_size.n()+128-1)/128;
-    grid.y = (arg.problem_size.m()+128-1)/128;
+    grid.x = DIV(arg.problem_size.n(),128) * (1<<logtile);
+    grid.y = DIV(DIV(arg.problem_size.m(),128),1<<logtile);
     grid.z = 1;
 
     block.x = 128;
     block.y = 1;
     block.z = 1;
 
-    GEMM_MMA<<<grid,block>>>(arg);
+    GEMM_MMA<logtile><<<grid,block>>>(arg);
 }
 
 // Create a tuple of problem size for matrix multiplication
