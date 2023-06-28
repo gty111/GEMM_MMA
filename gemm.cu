@@ -555,7 +555,7 @@ void launch_GEMM_MMA(MMAarguments &arg){
     block.y = 1;
     block.z = 1;
 
-    GEMM_MMA<logtile><<<grid,block>>>(arg);
+    GEMM_MMA<<<grid,block>>>(arg);
 }
 
 // Create a tuple of problem size for matrix multiplication
