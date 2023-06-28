@@ -504,7 +504,6 @@ __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
     }
 }
 
-template<int logtile=2>
 __global__ void GEMM_MMA(MMAarguments arg){
     __shared__ ElementInputA tileA[3][128*8];
     __shared__ ElementInputB tileB[3][8*128];
