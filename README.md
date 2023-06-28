@@ -54,6 +54,12 @@ shape 分支调整了每个block和warp计算的矩阵C的大小
 
 优化后性能：62.39%
 
+### [9. 调整线程块分配到的计算位置(swizzle)](https://github.com/gty111/GEMM_MMA/tree/swizzle)
+
+swizzle 分支调整每个thread block分配到的计算位置来优化性能
+
+优化后性能: 68.43%
+
 ## 总体思路
 
 <img src="pic/gemm_mma.png" title="" alt="" width="491">
