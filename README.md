@@ -60,4 +60,6 @@ swizzle 分支调整每个thread block分配到的计算位置来优化性能
 
 优化后性能: 68.43%
 
+### [10. 尝试使用ldmatrix指令(ldmatrix)](https://github.com/gty111/GEMM_MMA/tree/ldmatrix)
 
+ldmatrix 分支尝试使用`ldmatrix`指令来加载共享内存
