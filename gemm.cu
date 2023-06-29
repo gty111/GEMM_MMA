@@ -195,8 +195,8 @@ using Gemm = cutlass::gemm::device::Gemm<ElementInputA,
                                          SwizzleThreadBlock,
                                          NumStages>;
 
-const int M = ShapeMMAOp::kM;
-const int N = ShapeMMAOp::kN;
+// const int M = ShapeMMAOp::kM;
+// const int N = ShapeMMAOp::kN;
 const int K = ShapeMMAOp::kK;
 
 const int logtile = 2; // for threadblock swizzle
@@ -219,13 +219,14 @@ struct Index{
     int colA[2][4];
     int rowB[2][4];
     int colB[2][4];
-    int a[4][4];
-    int b[8][2];
+    int a[4];
+    int b[4];
     int tileidx[2];
 
     __device__ Index(){
         warpidx = threadIdx.x / 32;
         laneidx = threadIdx.x % 32;
+
         rowwarp = warpidx / 2;
         colwarp = warpidx % 2;
 
@@ -250,16 +251,22 @@ struct Index{
             }
         }
 
+        int t[4];
+
         for(int i=0;i<4;i++){
-            a[i][0] = (rowwarp*64+i*M+laneidx/4)*K + laneidx%4;
-            a[i][1] = a[i][0] + 8*K;
-            a[i][2] = a[i][0] + 4;
-            a[i][3] = a[i][1] + 4;
+            t[0] = (rowwarp*64 + i*16 + laneidx%8 )*K;
+            t[1] = t[0] + 8*K;
+            t[2] = t[0] + 4;
+            t[3] = t[1] + 4;
+            a[i] = t[laneidx/8];
         }
 
-        for(int i=0;i<8;i++){
-            b[i][0] = (colwarp*64+i*N+laneidx/4)*K + laneidx%4;
-            b[i][1] = b[i][0] + 4;
+        for(int i=0;i<4;i++){
+            t[0] = (colwarp*64 + i*16 + laneidx%8)*K;
+            t[1] = t[0] + 4;
+            t[2] = t[0] + 8*K;
+            t[3] = t[2] + 4;
+            b[i] = t[laneidx/8];
         }
     }
 };
@@ -375,20 +382,32 @@ __device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOu
 }
 
 __device__ void ldsA(ElementInputA *As,ElementInputA *Ar,Index &index){
-    // As[128*8] Ar[16]
     for(int i=0;i<4;i++){
-        for(int j=0;j<4;j++){
-            Ar[i*4+j] = As[index.a[i][j]];
-        }
+        asm volatile(
+            "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];" 
+            : 
+            "=r"(*(uint32_t*)&Ar[i*4]), 
+            "=r"(*(uint32_t*)&Ar[i*4+1]), 
+            "=r"(*(uint32_t*)&Ar[i*4+2]), 
+            "=r"(*(uint32_t*)&Ar[i*4+3])
+            : 
+            "r"((uint32_t)__cvta_generic_to_shared(&As[index.a[i]])) 
+        );
     }
 }
 
 __device__ void ldsB(ElementInputB *Bs,ElementInputB *Br,Index &index){
-    // Bs[8*64] Br[8]
-    for(int i=0;i<8;i++){
-        for(int j=0;j<2;j++){
-            Br[i*2+j] = Bs[index.b[i][j]];
-        }
+    for(int i=0;i<4;i++){
+        asm volatile(
+            "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];" 
+            : 
+            "=r"(*(uint32_t*)&Br[i*4]), 
+            "=r"(*(uint32_t*)&Br[i*4+1]), 
+            "=r"(*(uint32_t*)&Br[i*4+2]), 
+            "=r"(*(uint32_t*)&Br[i*4+3])
+            :
+            "r"((uint32_t)__cvta_generic_to_shared(&Bs[index.b[i]])) 
+        );
     }
 }
 
@@ -504,7 +523,6 @@ __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
     }
 }
 
-template<int logtile=2>
 __global__ void GEMM_MMA(MMAarguments arg){
     __shared__ ElementInputA tileA[3][128*8];
     __shared__ ElementInputB tileB[3][8*128];
@@ -556,7 +574,7 @@ void launch_GEMM_MMA(MMAarguments &arg){
     block.y = 1;
     block.z = 1;
 
-    GEMM_MMA<logtile><<<grid,block>>>(arg);
+    GEMM_MMA<<<grid,block>>>(arg);
 }
 
 // Create a tuple of problem size for matrix multiplication
