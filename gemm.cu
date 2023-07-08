@@ -90,7 +90,7 @@ struct GpuTimer
         return elapsed;
     }
 
-    void bind_run(std::string name,const std::function<void()> &kernel,int test_time=10){
+    void bind_run(std::string name,const std::function<void()> &kernel,int test_time=1){
         float run_ms = 0;
         for(int i=0;i<test_time;i++){
             start();
@@ -219,14 +219,15 @@ struct Index{
     int colA[2][4];
     int rowB[2][4];
     int colB[2][4];
+    // int a[4][4];
+    // int b[8][2];
+    int tileidx[2];
     int a[4];
     int b[4];
-    int tileidx[2];
 
     __device__ Index(){
         warpidx = threadIdx.x / 32;
         laneidx = threadIdx.x % 32;
-
         rowwarp = warpidx / 2;
         colwarp = warpidx % 2;
 
@@ -234,39 +235,38 @@ struct Index{
         blockIdx_y = (blockIdx.y << logtile) + ((blockIdx.x) & ((1 << (logtile)) - 1));
 
         for(int i=0;i<2;i++){
-            tileidx[i] = threadIdx.x*4 + i*blockDim.x*4;
+            tileidx[i] = laneidx/2*8 + (((laneidx>>3)^laneidx)&1)*4 + warpidx*128 + i*128*4;
         }
 
         for(int i=0;i<2;i++){
             for(int j=0;j<4;j++){
-                rowA[i][j] = (tileidx[i]+j) / K + blockIdx_y * 128;
-                colA[i][j] = (tileidx[i]+j) % K;
+                rowA[i][j] = laneidx/2 + warpidx*16 + i*64 + blockIdx_y * 128;
+                colA[i][j] = laneidx%2*4 + j ;
             }
         }
 
         for(int i=0;i<2;i++){
             for(int j=0;j<4;j++){
-                rowB[i][j] = (tileidx[i]+j) % K;
-                colB[i][j] = (tileidx[i]+j) / K + blockIdx_x * 128;
+                rowB[i][j] = laneidx%2*4 + j;
+                colB[i][j] = laneidx/2 + warpidx*16 + i*64 + blockIdx_x * 128;
             }
         }
 
-        int t[4];
+        // for(int i=0;i<4;i++){
+        //     a[i][0] = (rowwarp*64+i*M+laneidx/4)*K + laneidx%4 + laneidx/16*4;
+        //     a[i][1] = a[i][0] + 8*K;
+        //     a[i][2] = (rowwarp*64+i*M+laneidx/4)*K + laneidx%4 + 4 - laneidx/16*4;
+        //     a[i][3] = a[i][2] + 8*K;
+        // }
+
+        // for(int i=0;i<8;i++){
+        //     b[i][0] = (colwarp*64+i*N+laneidx/4)*K + laneidx%4 + laneidx/16*4;
+        //     b[i][1] = (colwarp*64+i*N+laneidx/4)*K + laneidx%4 + 4 - laneidx/16*4;
+        // }
 
         for(int i=0;i<4;i++){
-            t[0] = (rowwarp*64 + i*16 + laneidx%8 )*K;
-            t[1] = t[0] + 8*K;
-            t[2] = t[0] + 4;
-            t[3] = t[1] + 4;
-            a[i] = t[laneidx/8];
-        }
-
-        for(int i=0;i<4;i++){
-            t[0] = (colwarp*64 + i*16 + laneidx%8)*K;
-            t[1] = t[0] + 4;
-            t[2] = t[0] + 8*K;
-            t[3] = t[2] + 4;
-            b[i] = t[laneidx/8];
+            a[i] = rowwarp*64*8+i*16*8+laneidx%16*8+(((laneidx>>2)^(laneidx>>4))&1)*4;
+            b[i] = colwarp*64*8+i*16*8+(laneidx%8+laneidx/16*8)*8+(((laneidx>>2)^(laneidx>>3))&1)*4;
         }
     }
 };
@@ -382,6 +382,12 @@ __device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOu
 }
 
 __device__ void ldsA(ElementInputA *As,ElementInputA *Ar,Index &index){
+    // for(int i=0;i<4;i++){
+    //     for(int j=0;j<4;j++){
+    //         Ar[i*4+j] = As[index.a[i][j]];
+    //     }
+    // }
+
     for(int i=0;i<4;i++){
         asm volatile(
             "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];" 
@@ -397,6 +403,11 @@ __device__ void ldsA(ElementInputA *As,ElementInputA *Ar,Index &index){
 }
 
 __device__ void ldsB(ElementInputB *Bs,ElementInputB *Br,Index &index){
+    // for(int i=0;i<8;i++){
+    //     for(int j=0;j<2;j++){
+    //         Br[i*2+j] = Bs[index.b[i][j]];
+    //     }
+    // }
     for(int i=0;i<4;i++){
         asm volatile(
             "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];" 
@@ -461,66 +472,96 @@ __device__ void mma_tile(MMAarguments &arg,ElementInputA *A_fragment,ElementInpu
 }
 
 __device__ void loadtileA(MMAarguments &arg,ElementInputA *A,Index &index){
-    // iter = 128 * 8 / 128
 
-    for(int i=0;i<2;i++){
+    bool test0 = test(index.rowA[0][0],index.colA[0][0],arg.problem_size.m(),arg.problem_size.k()); 
+    bool test1 = test(index.rowA[0][1],index.colA[0][1],arg.problem_size.m(),arg.problem_size.k());
+    bool test2 = test(index.rowA[0][2],index.colA[0][2],arg.problem_size.m(),arg.problem_size.k());
+    bool test3 = test(index.rowA[0][3],index.colA[0][3],arg.problem_size.m(),arg.problem_size.k());
 
-        bool test0 = test(index.rowA[i][0],index.colA[i][0],arg.problem_size.m(),arg.problem_size.k()); 
-        bool test1 = test(index.rowA[i][1],index.colA[i][1],arg.problem_size.m(),arg.problem_size.k());
-        bool test2 = test(index.rowA[i][2],index.colA[i][2],arg.problem_size.m(),arg.problem_size.k());
-        bool test3 = test(index.rowA[i][3],index.colA[i][3],arg.problem_size.m(),arg.problem_size.k());
+    bool test4 = test(index.rowA[1][0],index.colA[1][0],arg.problem_size.m(),arg.problem_size.k()); 
+    bool test5 = test(index.rowA[1][1],index.colA[1][1],arg.problem_size.m(),arg.problem_size.k());
+    bool test6 = test(index.rowA[1][2],index.colA[1][2],arg.problem_size.m(),arg.problem_size.k());
+    bool test7 = test(index.rowA[1][3],index.colA[1][3],arg.problem_size.m(),arg.problem_size.k());
 
-        if(test0&&test1&&test2&&test3){
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((uint32_t)__cvta_generic_to_shared(&A[index.tileidx[i]])),
-                "l"(&arg.A[index.rowA[i][0]*arg.problem_size.k()+index.colA[i][0]]),
-                "n"(16)
-            );
-        }else{
-            A[index.tileidx[i]]   = test0 ? arg.A[index.rowA[i][0]*arg.problem_size.k()+index.colA[i][0]] : ElementInputA(0);
-            A[index.tileidx[i]+1] = test1 ? arg.A[index.rowA[i][1]*arg.problem_size.k()+index.colA[i][1]] : ElementInputA(0);
-            A[index.tileidx[i]+2] = test2 ? arg.A[index.rowA[i][2]*arg.problem_size.k()+index.colA[i][2]] : ElementInputA(0);
-            A[index.tileidx[i]+3] = test3 ? arg.A[index.rowA[i][3]*arg.problem_size.k()+index.colA[i][3]] : ElementInputA(0);
-        }
+    if(test0&&test1&&test2&&test3&&test4&&test5&&test6&&test7){
+        asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+            :: "r"((uint32_t)__cvta_generic_to_shared(&A[index.tileidx[0]])),
+            "l"(&arg.A[index.rowA[0][0]*arg.problem_size.k()+index.colA[0][0]]),
+            "n"(16)
+        );
+        asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+            :: "r"((uint32_t)__cvta_generic_to_shared(&A[index.tileidx[1]])),
+            "l"(&arg.A[index.rowA[1][0]*arg.problem_size.k()+index.colA[1][0]]),
+            "n"(16)
+        );
+    }else{
+        A[index.tileidx[0]]   = test0 ? arg.A[index.rowA[0][0]*arg.problem_size.k()+index.colA[0][0]] : ElementInputA(0);
+        A[index.tileidx[0]+1] = test1 ? arg.A[index.rowA[0][1]*arg.problem_size.k()+index.colA[0][1]] : ElementInputA(0);
+        A[index.tileidx[0]+2] = test2 ? arg.A[index.rowA[0][2]*arg.problem_size.k()+index.colA[0][2]] : ElementInputA(0);
+        A[index.tileidx[0]+3] = test3 ? arg.A[index.rowA[0][3]*arg.problem_size.k()+index.colA[0][3]] : ElementInputA(0);
 
+        A[index.tileidx[1]]   = test4 ? arg.A[index.rowA[1][0]*arg.problem_size.k()+index.colA[1][0]] : ElementInputA(0);
+        A[index.tileidx[1]+1] = test5 ? arg.A[index.rowA[1][1]*arg.problem_size.k()+index.colA[1][1]] : ElementInputA(0);
+        A[index.tileidx[1]+2] = test6 ? arg.A[index.rowA[1][2]*arg.problem_size.k()+index.colA[1][2]] : ElementInputA(0);
+        A[index.tileidx[1]+3] = test7 ? arg.A[index.rowA[1][3]*arg.problem_size.k()+index.colA[1][3]] : ElementInputA(0);
     }
 
-    for(int i=0;i<2;i++){
-        for(int j=0;j<4;j++){
-            index.colA[i][j] += K;
-        }
-    }
+    index.colA[0][0] += K;
+    index.colA[0][1] += K;
+    index.colA[0][2] += K;
+    index.colA[0][3] += K;
+
+    index.colA[1][0] += K;
+    index.colA[1][1] += K;
+    index.colA[1][2] += K;
+    index.colA[1][3] += K;
 
 }
 
 __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
-    // iter = 128 * 8 / 128
-    for(int i=0;i<2;i++){
 
-        bool test0 = test(index.rowB[i][0],index.colB[i][0],arg.problem_size.k(),arg.problem_size.n()); 
-        bool test1 = test(index.rowB[i][1],index.colB[i][1],arg.problem_size.k(),arg.problem_size.n());
-        bool test2 = test(index.rowB[i][2],index.colB[i][2],arg.problem_size.k(),arg.problem_size.n());
-        bool test3 = test(index.rowB[i][3],index.colB[i][3],arg.problem_size.k(),arg.problem_size.n());
+    bool test0 = test(index.rowB[0][0],index.colB[0][0],arg.problem_size.k(),arg.problem_size.n()); 
+    bool test1 = test(index.rowB[0][1],index.colB[0][1],arg.problem_size.k(),arg.problem_size.n());
+    bool test2 = test(index.rowB[0][2],index.colB[0][2],arg.problem_size.k(),arg.problem_size.n());
+    bool test3 = test(index.rowB[0][3],index.colB[0][3],arg.problem_size.k(),arg.problem_size.n());
 
-        if(test0&&test1&&test2&&test3){
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((uint32_t)__cvta_generic_to_shared(&B[index.tileidx[i]])),
-                "l"(&arg.B[index.colB[i][0]*arg.problem_size.k()+index.rowB[i][0]]),
-                "n"(16)
-            );
-        }else{
-            B[index.tileidx[i]]   = test0 ? arg.B[index.colB[i][0]*arg.problem_size.k()+index.rowB[i][0]] : ElementInputB(0);
-            B[index.tileidx[i]+1] = test1 ? arg.B[index.colB[i][1]*arg.problem_size.k()+index.rowB[i][1]] : ElementInputB(0);
-            B[index.tileidx[i]+2] = test2 ? arg.B[index.colB[i][2]*arg.problem_size.k()+index.rowB[i][2]] : ElementInputB(0);
-            B[index.tileidx[i]+3] = test3 ? arg.B[index.colB[i][3]*arg.problem_size.k()+index.rowB[i][3]] : ElementInputB(0);
-        }
+    bool test4 = test(index.rowB[1][0],index.colB[1][0],arg.problem_size.k(),arg.problem_size.n()); 
+    bool test5 = test(index.rowB[1][1],index.colB[1][1],arg.problem_size.k(),arg.problem_size.n());
+    bool test6 = test(index.rowB[1][2],index.colB[1][2],arg.problem_size.k(),arg.problem_size.n());
+    bool test7 = test(index.rowB[1][3],index.colB[1][3],arg.problem_size.k(),arg.problem_size.n());
+
+    if(test0&&test1&&test2&&test3&&test4&&test5&&test6&&test7){
+        asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+            :: "r"((uint32_t)__cvta_generic_to_shared(&B[index.tileidx[0]])),
+            "l"(&arg.B[index.colB[0][0]*arg.problem_size.k()+index.rowB[0][0]]),
+            "n"(16)
+        );
+        asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+            :: "r"((uint32_t)__cvta_generic_to_shared(&B[index.tileidx[1]])),
+            "l"(&arg.B[index.colB[1][0]*arg.problem_size.k()+index.rowB[1][0]]),
+            "n"(16)
+        );
+    }else{
+        B[index.tileidx[0]]   = test0 ? arg.B[index.colB[0][0]*arg.problem_size.k()+index.rowB[0][0]] : ElementInputB(0);
+        B[index.tileidx[0]+1] = test1 ? arg.B[index.colB[0][1]*arg.problem_size.k()+index.rowB[0][1]] : ElementInputB(0);
+        B[index.tileidx[0]+2] = test2 ? arg.B[index.colB[0][2]*arg.problem_size.k()+index.rowB[0][2]] : ElementInputB(0);
+        B[index.tileidx[0]+3] = test3 ? arg.B[index.colB[0][3]*arg.problem_size.k()+index.rowB[0][3]] : ElementInputB(0);
+
+        B[index.tileidx[1]]   = test4 ? arg.B[index.colB[1][0]*arg.problem_size.k()+index.rowB[1][0]] : ElementInputB(0);
+        B[index.tileidx[1]+1] = test5 ? arg.B[index.colB[1][1]*arg.problem_size.k()+index.rowB[1][1]] : ElementInputB(0);
+        B[index.tileidx[1]+2] = test6 ? arg.B[index.colB[1][2]*arg.problem_size.k()+index.rowB[1][2]] : ElementInputB(0);
+        B[index.tileidx[1]+3] = test7 ? arg.B[index.colB[1][3]*arg.problem_size.k()+index.rowB[1][3]] : ElementInputB(0);
     }
 
-    for(int i=0;i<2;i++){
-        for(int j=0;j<4;j++){
-            index.rowB[i][j] += K;
-        }
-    }
+    index.rowB[0][0] += K;
+    index.rowB[0][1] += K;
+    index.rowB[0][2] += K;
+    index.rowB[0][3] += K;
+
+    index.rowB[1][0] += K;
+    index.rowB[1][1] += K;
+    index.rowB[1][2] += K;
+    index.rowB[1][3] += K;
 }
 
 __global__ void GEMM_MMA(MMAarguments arg){
@@ -590,10 +631,13 @@ GpuTimer timer;
 
 int main(int argc,char **argv){
     //////////////////////////INIT////////////////////////////////
+    bool ifprint = 0;
 
     if(argc>=2)problem_size.m()=atoi(argv[1]);
     if(argc>=3)problem_size.n()=atoi(argv[2]);
     if(argc>=4)problem_size.k()=atoi(argv[3]);
+    if(argc>=5)ifprint=atoi(argv[4]);
+
 
     printf("[%20s] (%d,%d,%d)\n","problem size",problem_size.m(),problem_size.n(),problem_size.k());
 
@@ -690,7 +734,7 @@ int main(int argc,char **argv){
             launch_GEMM_MMA(mmaArg);
         });
         
-        timer.testEqual<ElementOutput,LayoutOutput>("MMA_tune==ref",tensor_d,tensor_mma_d);
+        timer.testEqual<ElementOutput,LayoutOutput>("MMA_tune==ref",tensor_d,tensor_mma_d,ifprint);
     }
 
 }
