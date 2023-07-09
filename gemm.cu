@@ -339,17 +339,19 @@ __device__ bool test(int a0,int b0,int a1,int b1){
 }
 
 __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOutput *C_fragemnt2,Index &index){
+    int rowtile,coltile,rowC,colC;
+    bool test0,test1;
     for(int i=0;i<16;i++){
-        int rowtile = i / 8;
-        int coltile = i % 8;
+        rowtile = i / 8;
+        coltile = i % 8;
         for(int j=0;j<2;j++){
-            int rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8;
-            int colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
+            rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8;
+            colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
-            bool test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
-            bool test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
+            test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
+            test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
 
-            if(test0&&test1){   
+            if(test1){   
                 *reinterpret_cast<float2*>(&C_fragemnt1[i*4+j*2]) = *reinterpret_cast<float2*>(&arg.C[rowC*arg.problem_size.n()+colC]) ; 
             }else{
                 C_fragemnt1[i*4+j*2]   = test0 ? arg.C[rowC*arg.problem_size.n()+colC] : ElementOutput(0); 
@@ -359,16 +361,16 @@ __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOu
     }
 
     for(int i=0;i<16;i++){
-        int rowtile = i / 8 + 2;
-        int coltile = i % 8;
+        rowtile = i / 8 + 2;
+        coltile = i % 8;
         for(int j=0;j<2;j++){
-            int rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8;
-            int colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
+            rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8;
+            colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
-            bool test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
-            bool test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
+            test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
+            test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
 
-            if(test0&&test1){   
+            if(test1){   
                 *reinterpret_cast<float2*>(&C_fragemnt2[i*4+j*2]) = *reinterpret_cast<float2*>(&arg.C[rowC*arg.problem_size.n()+colC]) ; 
             }else{
                 C_fragemnt2[i*4+j*2]   = test0 ? arg.C[rowC*arg.problem_size.n()+colC] : ElementOutput(0); 
@@ -379,18 +381,20 @@ __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOu
 }
 
 __device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOutput *C_fragment2,Index &index){
-    
+    int rowtile,coltile,rowC,colC;
+    bool test0,test1;
+
     for(int i=0;i<16;i++){
-        int rowtile = i / 8;
-        int coltile = i % 8;
+        rowtile = i / 8;
+        coltile = i % 8;
         for(int j=0;j<2;j++){
-            int rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8 ;
-            int colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
+            rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8 ;
+            colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
-            bool test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
-            bool test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
+            test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
+            test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
 
-            if(test0&&test1){   
+            if(test1){   
                 *reinterpret_cast<float2*>(&arg.D[rowC*arg.problem_size.n()+colC]) = *reinterpret_cast<float2*>(&C_fragment1[i*4+j*2]) ; 
             }else{
                 if(test0)
@@ -402,16 +406,16 @@ __device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOu
     }
 
     for(int i=0;i<16;i++){
-        int rowtile = i / 8 + 2;
-        int coltile = i % 8;
+        rowtile = i / 8 + 2;
+        coltile = i % 8;
         for(int j=0;j<2;j++){
-            int rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8 ;
-            int colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
+            rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8 ;
+            colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
-            bool test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
-            bool test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
+            test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
+            test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
 
-            if(test0&&test1){   
+            if(test1){   
                 *reinterpret_cast<float2*>(&arg.D[rowC*arg.problem_size.n()+colC]) = *reinterpret_cast<float2*>(&C_fragment2[i*4+j*2]) ; 
             }else{
                 if(test0)
@@ -510,40 +514,36 @@ __device__ void mma_tile(MMAarguments &arg,ElementInputA *A_fragment,ElementInpu
     }
 }
 
+#define LDGSTSCG(smem_addr,glb_addr,nbytes) asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" \
+                                                            :: "r"((uint32_t)__cvta_generic_to_shared(smem_addr)), \
+                                                            "l"(glb_addr), \
+                                                            "n"(nbytes))
+
+#define LDGSTSCA(smem_addr,glb_addr,nbytes,src_in_bytes) asm volatile("cp.async.ca.shared.global [%0], [%1], %2, %3;\n" \
+                                                            :: "r"((uint32_t)__cvta_generic_to_shared(smem_addr)), \
+                                                            "l"(glb_addr), \
+                                                            "n"(nbytes), \
+                                                            "r"(src_in_bytes))
+
 __device__ void loadtileA(MMAarguments &arg,ElementInputA *A,Index &index){
 
+    bool flag[4];
+
     for(int k=0;k<2;k++){
-        bool test0 = test(index.rowA[k][0][0],index.colA[k][0][0],arg.problem_size.m(),arg.problem_size.k()); 
-        bool test1 = test(index.rowA[k][0][1],index.colA[k][0][1],arg.problem_size.m(),arg.problem_size.k());
-        bool test2 = test(index.rowA[k][0][2],index.colA[k][0][2],arg.problem_size.m(),arg.problem_size.k());
-        bool test3 = test(index.rowA[k][0][3],index.colA[k][0][3],arg.problem_size.m(),arg.problem_size.k());
+        for(int i=0;i<2;i++){
+            flag[0] = test(index.rowA[k][i][0],index.colA[k][i][0],arg.problem_size.m(),arg.problem_size.k()); 
+            flag[1] = test(index.rowA[k][i][1],index.colA[k][i][1],arg.problem_size.m(),arg.problem_size.k());
+            flag[2] = test(index.rowA[k][i][2],index.colA[k][i][2],arg.problem_size.m(),arg.problem_size.k());
+            flag[3] = test(index.rowA[k][i][3],index.colA[k][i][3],arg.problem_size.m(),arg.problem_size.k());
 
-        bool test4 = test(index.rowA[k][1][0],index.colA[k][1][0],arg.problem_size.m(),arg.problem_size.k()); 
-        bool test5 = test(index.rowA[k][1][1],index.colA[k][1][1],arg.problem_size.m(),arg.problem_size.k());
-        bool test6 = test(index.rowA[k][1][2],index.colA[k][1][2],arg.problem_size.m(),arg.problem_size.k());
-        bool test7 = test(index.rowA[k][1][3],index.colA[k][1][3],arg.problem_size.m(),arg.problem_size.k());
-
-        if(test0&&test1&&test2&&test3&&test4&&test5&&test6&&test7){
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((uint32_t)__cvta_generic_to_shared(&A[index.tileidx[k*2]])),
-                "l"(&arg.A[index.rowA[k][0][0]*arg.problem_size.k()+index.colA[k][0][0]]),
-                "n"(16)
-            );
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((uint32_t)__cvta_generic_to_shared(&A[index.tileidx[k*2+1]])),
-                "l"(&arg.A[index.rowA[k][1][0]*arg.problem_size.k()+index.colA[k][1][0]]),
-                "n"(16)
-            );
-        }else{
-            A[index.tileidx[k*2]]   = test0 ? arg.A[index.rowA[k][0][0]*arg.problem_size.k()+index.colA[k][0][0]] : ElementInputA(0);
-            A[index.tileidx[k*2]+1] = test1 ? arg.A[index.rowA[k][0][1]*arg.problem_size.k()+index.colA[k][0][1]] : ElementInputA(0);
-            A[index.tileidx[k*2]+2] = test2 ? arg.A[index.rowA[k][0][2]*arg.problem_size.k()+index.colA[k][0][2]] : ElementInputA(0);
-            A[index.tileidx[k*2]+3] = test3 ? arg.A[index.rowA[k][0][3]*arg.problem_size.k()+index.colA[k][0][3]] : ElementInputA(0);
-
-            A[index.tileidx[k*2+1]]   = test4 ? arg.A[index.rowA[k][1][0]*arg.problem_size.k()+index.colA[k][1][0]] : ElementInputA(0);
-            A[index.tileidx[k*2+1]+1] = test5 ? arg.A[index.rowA[k][1][1]*arg.problem_size.k()+index.colA[k][1][1]] : ElementInputA(0);
-            A[index.tileidx[k*2+1]+2] = test6 ? arg.A[index.rowA[k][1][2]*arg.problem_size.k()+index.colA[k][1][2]] : ElementInputA(0);
-            A[index.tileidx[k*2+1]+3] = test7 ? arg.A[index.rowA[k][1][3]*arg.problem_size.k()+index.colA[k][1][3]] : ElementInputA(0);
+            if(flag[3]){
+                LDGSTSCG(&A[index.tileidx[k*2+i]],&arg.A[index.rowA[k][i][0]*arg.problem_size.k()+index.colA[k][i][0]],16);
+            }else{
+                LDGSTSCA(&A[index.tileidx[k*2+i]+0],&arg.A[index.rowA[k][i][0]*arg.problem_size.k()+index.colA[k][i][0]],4,flag[0]*4);
+                LDGSTSCA(&A[index.tileidx[k*2+i]+1],&arg.A[index.rowA[k][i][1]*arg.problem_size.k()+index.colA[k][i][1]],4,flag[1]*4);
+                LDGSTSCA(&A[index.tileidx[k*2+i]+2],&arg.A[index.rowA[k][i][2]*arg.problem_size.k()+index.colA[k][i][2]],4,flag[2]*4);
+                LDGSTSCA(&A[index.tileidx[k*2+i]+3],&arg.A[index.rowA[k][i][3]*arg.problem_size.k()+index.colA[k][i][3]],4,flag[3]*4);
+            }
         }
     }
 
@@ -558,41 +558,25 @@ __device__ void loadtileA(MMAarguments &arg,ElementInputA *A,Index &index){
 
 __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
 
+    bool flag[4];
+
     for(int k=0;k<2;k++){
-        bool test0 = test(index.rowB[k][0][0],index.colB[k][0][0],arg.problem_size.k(),arg.problem_size.n()); 
-        bool test1 = test(index.rowB[k][0][1],index.colB[k][0][1],arg.problem_size.k(),arg.problem_size.n());
-        bool test2 = test(index.rowB[k][0][2],index.colB[k][0][2],arg.problem_size.k(),arg.problem_size.n());
-        bool test3 = test(index.rowB[k][0][3],index.colB[k][0][3],arg.problem_size.k(),arg.problem_size.n());
+        for(int i=0;i<2;i++){
+            flag[0] = test(index.rowB[k][i][0],index.colB[k][i][0],arg.problem_size.k(),arg.problem_size.n()); 
+            flag[1] = test(index.rowB[k][i][1],index.colB[k][i][1],arg.problem_size.k(),arg.problem_size.n());
+            flag[2] = test(index.rowB[k][i][2],index.colB[k][i][2],arg.problem_size.k(),arg.problem_size.n());
+            flag[3] = test(index.rowB[k][i][3],index.colB[k][i][3],arg.problem_size.k(),arg.problem_size.n());
 
-        bool test4 = test(index.rowB[k][1][0],index.colB[k][1][0],arg.problem_size.k(),arg.problem_size.n()); 
-        bool test5 = test(index.rowB[k][1][1],index.colB[k][1][1],arg.problem_size.k(),arg.problem_size.n());
-        bool test6 = test(index.rowB[k][1][2],index.colB[k][1][2],arg.problem_size.k(),arg.problem_size.n());
-        bool test7 = test(index.rowB[k][1][3],index.colB[k][1][3],arg.problem_size.k(),arg.problem_size.n());
-
-        if(test0&&test1&&test2&&test3&&test4&&test5&&test6&&test7){
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((uint32_t)__cvta_generic_to_shared(&B[index.tileidx[k*2]])),
-                "l"(&arg.B[index.colB[k][0][0]*arg.problem_size.k()+index.rowB[k][0][0]]),
-                "n"(16)
-            );
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((uint32_t)__cvta_generic_to_shared(&B[index.tileidx[k*2+1]])),
-                "l"(&arg.B[index.colB[k][1][0]*arg.problem_size.k()+index.rowB[k][1][0]]),
-                "n"(16)
-            );
-        }else{
-            B[index.tileidx[k*2]]   = test0 ? arg.B[index.colB[k][0][0]*arg.problem_size.k()+index.rowB[k][0][0]] : ElementInputB(0);
-            B[index.tileidx[k*2]+1] = test1 ? arg.B[index.colB[k][0][1]*arg.problem_size.k()+index.rowB[k][0][1]] : ElementInputB(0);
-            B[index.tileidx[k*2]+2] = test2 ? arg.B[index.colB[k][0][2]*arg.problem_size.k()+index.rowB[k][0][2]] : ElementInputB(0);
-            B[index.tileidx[k*2]+3] = test3 ? arg.B[index.colB[k][0][3]*arg.problem_size.k()+index.rowB[k][0][3]] : ElementInputB(0);
-
-            B[index.tileidx[k*2+1]]   = test4 ? arg.B[index.colB[k][1][0]*arg.problem_size.k()+index.rowB[k][1][0]] : ElementInputB(0);
-            B[index.tileidx[k*2+1]+1] = test5 ? arg.B[index.colB[k][1][1]*arg.problem_size.k()+index.rowB[k][1][1]] : ElementInputB(0);
-            B[index.tileidx[k*2+1]+2] = test6 ? arg.B[index.colB[k][1][2]*arg.problem_size.k()+index.rowB[k][1][2]] : ElementInputB(0);
-            B[index.tileidx[k*2+1]+3] = test7 ? arg.B[index.colB[k][1][3]*arg.problem_size.k()+index.rowB[k][1][3]] : ElementInputB(0);
+            if(flag[3]){
+                LDGSTSCG(&B[index.tileidx[k*2+i]],&arg.B[index.colB[k][i][0]*arg.problem_size.k()+index.rowB[k][i][0]],16);
+            }else{
+                LDGSTSCA(&B[index.tileidx[k*2+i]+0],&arg.B[index.colB[k][i][0]*arg.problem_size.k()+index.rowB[k][i][0]],4,flag[0]*4);
+                LDGSTSCA(&B[index.tileidx[k*2+i]+1],&arg.B[index.colB[k][i][1]*arg.problem_size.k()+index.rowB[k][i][1]],4,flag[1]*4);
+                LDGSTSCA(&B[index.tileidx[k*2+i]+2],&arg.B[index.colB[k][i][2]*arg.problem_size.k()+index.rowB[k][i][2]],4,flag[2]*4);
+                LDGSTSCA(&B[index.tileidx[k*2+i]+3],&arg.B[index.colB[k][i][3]*arg.problem_size.k()+index.rowB[k][i][3]],4,flag[3]*4);
+            }
         }
     }
-    
 
     for(int k=0;k<2;k++){
         for(int i=0;i<2;i++){
@@ -643,7 +627,7 @@ __global__ void GEMM_MMA(MMAarguments arg){
         
         loadtileA(arg,&tileA[(i+3)%4*256*8],index);
         loadtileB(arg,&tileB[(i+3)%4*256*8],index); 
-        asm("cp.async.commit_group;\n"::);
+        asm("cp.async.commit_group;\n"::); 
     }
 
     storetile(arg,C_fragment1,C_fragment2,index);
