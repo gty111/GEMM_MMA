@@ -244,10 +244,6 @@ using Gemm = cutlass::gemm::device::Gemm<ElementInputA,
                                          SwizzleThreadBlock,
                                          NumStages>;
 
-// const int M = ShapeMMAOp::kM;
-// const int N = ShapeMMAOp::kN;
-// const int K = ShapeMMAOp::kK;
-
 const int logtile = 2; // for threadblock swizzle
 
 struct MMAarguments{
@@ -290,13 +286,7 @@ struct Index{
                 for(int j=0;j<4;j++){
                     rowA[k][i][j] = laneidx/2 + warpidx*16 + i*64 + blockIdx_y * 128;
                     colA[k][i][j] = laneidx%2*4 + j + k*8;
-                }
-            }
-        }
-        
-        for(int k=0;k<2;k++){
-            for(int i=0;i<2;i++){
-                for(int j=0;j<4;j++){
+
                     rowB[k][i][j] = laneidx%2*4 + j + k*8;
                     colB[k][i][j] = laneidx/2 + warpidx*16 + i*64 + blockIdx_x * 128;
                 }
@@ -487,10 +477,7 @@ __device__ void mma_tile(MMAarguments &arg,ElementInputA *A_fragment,ElementInpu
             "f"(C_fragment1[i*4+2]),   // C[2]
             "f"(C_fragment1[i*4+3])    // C[3]
         );
-    }
 
-    for(int k=0;k<2;k++)
-    for(int i=0;i<16;i++){
         asm volatile(
             "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
             "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
