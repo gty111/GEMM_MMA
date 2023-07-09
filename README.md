@@ -1,8 +1,8 @@
 # GEMM MMA
 
-GEMM MMA 构建了一个初级的GEMM kernel， 它使用CUDA `mma.sync`指令来使用GPU tensor core单元，并对比了和cutlass算子的性能，本例主要为了介绍使用 `mma.sync` 构建一个完整的GEMM kernel，性能还有很大的优化空间。
+GEMM MMA 首先构建了一个初级的GEMM kernel， 它使用CUDA `mma.sync`指令来使用GPU tensor core单元，之后每次引入一个优化概念并对比性能变化
 
-最终优化的性能: 73.65% (相比cutlass，测试维度为8192x8192x8192)
+最终优化的性能: 73.65% (相比cutlass算子，测试维度为8192x8192x8192)
 
 [source code: gemm.cu](https://github.com/gty111/GEMM_MMA/blob/ldmatrix/gemm.cu)
 
