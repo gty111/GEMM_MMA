@@ -501,36 +501,26 @@ __device__ void mma_tile(MMAarguments &arg,ElementInputA *A_fragment,ElementInpu
     }
 }
 
-#define LDGSTSCG(smem_addr,glb_addr,nbytes) asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" \
-                                                            :: "r"((uint32_t)__cvta_generic_to_shared(smem_addr)), \
-                                                            "l"(glb_addr), \
-                                                            "n"(nbytes))
-
-#define LDGSTSCA(smem_addr,glb_addr,nbytes,src_in_bytes) asm volatile("cp.async.ca.shared.global [%0], [%1], %2, %3;\n" \
+#define LDGSTSCG(smem_addr,glb_addr,nbytes,src_in_bytes) asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], %2, %3;\n" \
                                                             :: "r"((uint32_t)__cvta_generic_to_shared(smem_addr)), \
                                                             "l"(glb_addr), \
                                                             "n"(nbytes), \
                                                             "r"(src_in_bytes))
 
+
+#define TESTA(j) test(index.rowA[k][i][j],index.colA[k][i][j],arg.problem_size.m(),arg.problem_size.k())
+
 __device__ void loadtileA(MMAarguments &arg,ElementInputA *A,Index &index){
 
-    bool flag[4];
+    int src_in_bytes;
 
     for(int k=0;k<2;k++){
         for(int i=0;i<2;i++){
-            flag[0] = test(index.rowA[k][i][0],index.colA[k][i][0],arg.problem_size.m(),arg.problem_size.k()); 
-            flag[1] = test(index.rowA[k][i][1],index.colA[k][i][1],arg.problem_size.m(),arg.problem_size.k());
-            flag[2] = test(index.rowA[k][i][2],index.colA[k][i][2],arg.problem_size.m(),arg.problem_size.k());
-            flag[3] = test(index.rowA[k][i][3],index.colA[k][i][3],arg.problem_size.m(),arg.problem_size.k());
+            // src_in_bytes = TESTA(3) ? 4 : TESTA(2) ? 3 : TESTA(1) ? 2 : TESTA(0) ? 1 : 0;
 
-            if(flag[3]){
-                LDGSTSCG(&A[index.tileidx[k*2+i]],&arg.A[index.rowA[k][i][0]*arg.problem_size.k()+index.colA[k][i][0]],16);
-            }else{
-                LDGSTSCA(&A[index.tileidx[k*2+i]+0],&arg.A[index.rowA[k][i][0]*arg.problem_size.k()+index.colA[k][i][0]],4,flag[0]*4);
-                LDGSTSCA(&A[index.tileidx[k*2+i]+1],&arg.A[index.rowA[k][i][1]*arg.problem_size.k()+index.colA[k][i][1]],4,flag[1]*4);
-                LDGSTSCA(&A[index.tileidx[k*2+i]+2],&arg.A[index.rowA[k][i][2]*arg.problem_size.k()+index.colA[k][i][2]],4,flag[2]*4);
-                LDGSTSCA(&A[index.tileidx[k*2+i]+3],&arg.A[index.rowA[k][i][3]*arg.problem_size.k()+index.colA[k][i][3]],4,flag[3]*4);
-            }
+            src_in_bytes = TESTA(3) + TESTA(2) + TESTA(1) + TESTA(0);
+
+            LDGSTSCG(&A[index.tileidx[k*2+i]],&arg.A[index.rowA[k][i][0]*arg.problem_size.k()+index.colA[k][i][0]],16,src_in_bytes*4);
         }
     }
 
@@ -543,25 +533,19 @@ __device__ void loadtileA(MMAarguments &arg,ElementInputA *A,Index &index){
     }
 }
 
+#define TESTB(j) test(index.rowB[k][i][j],index.colB[k][i][j],arg.problem_size.k(),arg.problem_size.n())
+
 __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
 
-    bool flag[4];
+    int src_in_bytes;
 
     for(int k=0;k<2;k++){
         for(int i=0;i<2;i++){
-            flag[0] = test(index.rowB[k][i][0],index.colB[k][i][0],arg.problem_size.k(),arg.problem_size.n()); 
-            flag[1] = test(index.rowB[k][i][1],index.colB[k][i][1],arg.problem_size.k(),arg.problem_size.n());
-            flag[2] = test(index.rowB[k][i][2],index.colB[k][i][2],arg.problem_size.k(),arg.problem_size.n());
-            flag[3] = test(index.rowB[k][i][3],index.colB[k][i][3],arg.problem_size.k(),arg.problem_size.n());
+            // src_in_bytes = TESTB(3) ? 4 : TESTB(2) ? 3 : TESTB(1) ? 2 : TESTB(0) ? 1 : 0;
 
-            if(flag[3]){
-                LDGSTSCG(&B[index.tileidx[k*2+i]],&arg.B[index.colB[k][i][0]*arg.problem_size.k()+index.rowB[k][i][0]],16);
-            }else{
-                LDGSTSCA(&B[index.tileidx[k*2+i]+0],&arg.B[index.colB[k][i][0]*arg.problem_size.k()+index.rowB[k][i][0]],4,flag[0]*4);
-                LDGSTSCA(&B[index.tileidx[k*2+i]+1],&arg.B[index.colB[k][i][1]*arg.problem_size.k()+index.rowB[k][i][1]],4,flag[1]*4);
-                LDGSTSCA(&B[index.tileidx[k*2+i]+2],&arg.B[index.colB[k][i][2]*arg.problem_size.k()+index.rowB[k][i][2]],4,flag[2]*4);
-                LDGSTSCA(&B[index.tileidx[k*2+i]+3],&arg.B[index.colB[k][i][3]*arg.problem_size.k()+index.rowB[k][i][3]],4,flag[3]*4);
-            }
+            src_in_bytes = TESTB(3) + TESTB(2) + TESTB(1) + TESTB(0);
+
+            LDGSTSCG(&B[index.tileidx[k*2+i]],&arg.B[index.colB[k][i][0]*arg.problem_size.k()+index.rowB[k][i][0]],16,src_in_bytes*4);
         }
     }
 
@@ -574,10 +558,11 @@ __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
     }
 }
 
-__global__ void GEMM_MMA(MMAarguments arg){
-    // __shared__ ElementInputA tileA[4][256*8];
-    // __shared__ ElementInputB tileB[4][8*256];
+#define DYNAMIC_SMEM
 
+__global__ void GEMM_MMA(MMAarguments arg){
+
+  #ifdef DYNAMIC_SMEM
     extern __shared__ ElementInputA tileA[];
 
     ElementInputB *tileB = reinterpret_cast<ElementInputB*>(&tileA[64*128]);
@@ -618,11 +603,54 @@ __global__ void GEMM_MMA(MMAarguments arg){
     }
 
     storetile(arg,C_fragment1,C_fragment2,index);
+  #else
+
+    __shared__ ElementInputA tileA[3][256*8];
+    __shared__ ElementInputB tileB[3][8*256];
+
+    ElementOutput C_fragment1[64],C_fragment2[64];
+    ElementInputA A_fragment[32];
+    ElementInputB B_fragment[32];
+
+    struct Index index;
+
+    const int iters = DIV(arg.problem_size.k(),16);
+    
+    loadtileC(arg,C_fragment1,C_fragment2,index);
+
+    loadtileA(arg,tileA[0],index);
+    loadtileB(arg,tileB[0],index);
+    asm("cp.async.commit_group;\n"::);
+
+    loadtileA(arg,tileA[1],index);
+    loadtileB(arg,tileB[1],index);
+    asm("cp.async.commit_group;\n"::);
+
+    for(int i=0;i<iters;i++){
+        asm("cp.async.wait_group 1;\n"::);
+        __syncthreads();
+
+        ldsA(tileA[i%3],A_fragment,index);
+        ldsB(tileB[i%3],B_fragment,index);
+        mma_tile(arg,A_fragment,B_fragment,C_fragment1,C_fragment2);
+        
+        loadtileA(arg,tileA[(i+2)%3],index);
+        loadtileB(arg,tileB[(i+2)%3],index); 
+        asm("cp.async.commit_group;\n"::); 
+    }
+
+    storetile(arg,C_fragment1,C_fragment2,index);
+
+  #endif
 }
+
+
 
 void launch_GEMM_MMA(MMAarguments &arg){
     dim3 grid,block;
+  #ifdef DYNAMIC_SMEM
     int smem_size;
+  #endif
     // threadblockShape 128 128 8
     // warpShape 64 64 8
     // every block has 4 warps
@@ -634,12 +662,16 @@ void launch_GEMM_MMA(MMAarguments &arg){
     block.x = 128;
     block.y = 1;
     block.z = 1;
-
+  #ifdef DYNAMIC_SMEM
     smem_size = 4*256*8*sizeof(ElementInputA)*2;
-
     CUDA_CHECK(cudaFuncSetAttribute((void *)GEMM_MMA, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+  #endif
 
+  #ifdef DYNAMIC_SMEM
     GEMM_MMA<<<grid,block,smem_size>>>(arg);
+  #else
+    GEMM_MMA<<<grid,block>>>(arg);
+  #endif
 }
 
 // Create a tuple of problem size for matrix multiplication
@@ -763,5 +795,4 @@ int main(int argc,const char **argv){
         timer.testEqual<ElementOutput,LayoutOutput>("MMA_tune==ref",tensor_d,tensor_mma_d,options.ifprint);
         // timer.printTensor<ElementInputA,LayoutInputA>("A",tensor_a);
     }
-
 }
