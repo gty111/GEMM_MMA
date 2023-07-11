@@ -69,3 +69,7 @@ swizzle 分支调整每个thread block分配到的计算位置来优化性能
 ldmatrix 分支使用`ldmatrix`指令来加载共享内存
 
 优化后性能: 73.65%
+
+### [11. 增加对参数alpha和beta的支持(epilogue)](https://github.com/gty111/GEMM_MMA/tree/epilogue)
+
+epilogue 分支增加了对参数`alpha`和`beta`的支持
