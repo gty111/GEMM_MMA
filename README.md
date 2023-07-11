@@ -1,12 +1,12 @@
-# GEMM MMA
+# [GEMM MMA](https://gty111.github.io/2023/06/20/gemm-optimize/)
 
 GEMM MMA 首先构建了一个初级的GEMM kernel， 它使用CUDA `mma.sync`指令来使用GPU tensor core单元，之后每次引入一个优化概念并对比性能变化
 
 最终优化的性能: 73.65% (相比cutlass算子，测试维度为8192x8192x8192)
 
-[source code: gemm.cu](https://github.com/gty111/GEMM_MMA/blob/ldmatrix/gemm.cu)
+[source code: gemm.cu](https://github.com/gty111/GEMM_MMA/blob/epilogue/gemm.cu)
 
-## Optimize GEMM step by step
+## [Optimize GEMM step by step](https://zhuanlan.zhihu.com/p/638522893)
 
 一步步优化GEMM系列，每次引入一个优化概念并对比性能变化，代码在每个分支的`gemm.cu`
 
