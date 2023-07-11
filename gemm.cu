@@ -495,9 +495,6 @@ __device__ void mma_tile(MMAarguments &arg,ElementInputA *A_fragment,ElementInpu
                                                             "n"(nbytes), \
                                                             "r"(src_in_bytes))
 
-
-#define TESTA(j) test(index.rowA[k][i][j],index.colA[k][i][j],arg.problem_size.m(),arg.problem_size.k())
-
 __device__ void loadtileA(MMAarguments &arg,ElementInputA *A,Index &index){
 
     int src_in_bytes;
@@ -516,8 +513,6 @@ __device__ void loadtileA(MMAarguments &arg,ElementInputA *A,Index &index){
         }
     }
 }
-
-#define TESTB(j) test(index.rowB[k][i][j],index.colB[k][i][j],arg.problem_size.k(),arg.problem_size.n())
 
 __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
 
