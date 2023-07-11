@@ -12,6 +12,7 @@
 #include <iostream>
 #include <functional>
 #include <cmath>
+#include <cassert>
 
 #define DIV(x,y) ((x)+(y)-1)/(y)
 
@@ -140,49 +141,62 @@ struct GpuTimer
 // Command line options parsing
 struct Options {
 
-  bool help;
+    bool help;
 
-  cutlass::gemm::GemmCoord problem_size;
-  int iterations;
-  bool ifprint;
+    float alpha = 1;
+    float beta = 1;
+
+    cutlass::gemm::GemmCoord problem_size;
+    int iterations;
+    bool ifprint;
   
-  Options():
+    Options():
     help(false),
     problem_size({5120, 4096, 4096}),
     iterations(20),
     ifprint(false)
     { }
 
-  // Parses the command line
-  void parse(int argc, char const **args) {
-    cutlass::CommandLine cmd(argc, args);
+    // Parses the command line
+    void parse(int argc, char const **args) {
+        cutlass::CommandLine cmd(argc, args);
 
-    if (cmd.check_cmd_line_flag("help")) {
-      help = true;
+        if (cmd.check_cmd_line_flag("help")) {
+            help = true;
+        }
+
+        cmd.get_cmd_line_argument("m", problem_size.m());
+        cmd.get_cmd_line_argument("n", problem_size.n());
+        cmd.get_cmd_line_argument("k", problem_size.k());
+
+        cmd.get_cmd_line_argument("alpha",alpha);
+        cmd.get_cmd_line_argument("beta",beta);
+
+        cmd.get_cmd_line_argument("iterations", iterations);
+        cmd.get_cmd_line_argument("print",ifprint);
+
+
+        printf("[%20s] (%d,%d,%d)\n","problem size",problem_size.m(),problem_size.n(),problem_size.k());
+        printf("[%20s] (%.2f,%.2f)\n","(alpha,beta)",alpha,beta);
+        printf("[%20s] %d\n","Iterations",iterations);
+
     }
 
-    cmd.get_cmd_line_argument("m", problem_size.m());
-    cmd.get_cmd_line_argument("n", problem_size.n());
-    cmd.get_cmd_line_argument("k", problem_size.k());
-    
-    cmd.get_cmd_line_argument("iterations", iterations);
-    cmd.get_cmd_line_argument("print",ifprint);
+    /// Prints the usage statement.
+    std::ostream & print_usage(std::ostream &out) const {
 
-  }
+        out << "Options:\n\n"
+            << "  --help                      If specified, displays this usage statement.\n\n"
+            << "  --m=<int>                   GEMM M dimension\n"
+            << "  --n=<int>                   GEMM N dimension\n"
+            << "  --k=<int>                   GEMM K dimension\n"
+            << "  --alpha=<float>             alpha\n"
+            << "  --beta=<float>              beta\n"
+            << "  --iterations=<int>          Number of profiling iterations to perform\n"
+            << "  --print=<bool>              print debug info\n\n";
 
-  /// Prints the usage statement.
-  std::ostream & print_usage(std::ostream &out) const {
-
-    out << "Options:\n\n"
-        << "  --help                      If specified, displays this usage statement.\n\n"
-        << "  --m=<int>                   GEMM M dimension\n"
-        << "  --n=<int>                   GEMM N dimension\n"
-        << "  --k=<int>                   GEMM K dimension\n"
-        << "  --iterations=<int>          Number of profiling iterations to perform\n"
-        << "  --print=<bool>              print debug info\n\n";
-
-    return out;
-  }
+        return out;
+    }
 };
 
 // The code section below describes datatype for input, output matrices and computation between
@@ -253,6 +267,7 @@ struct MMAarguments{
     ElementInputB *B;
     ElementAccumulator *C;
     ElementOutput *D;
+    float alpha,beta;
 };
 
 struct Index{
@@ -324,8 +339,8 @@ __device__ void printtile(T *arr,int row,int col,bool rowMajor){
 }
 
 // Continuous elements are continuous in dim0
-__device__ int valid_num(int dim1,int dim0,int ndim1,int ndim0,int max_bytes){
-    return dim1<ndim1 ? std::max(0,std::min(ndim0-dim0,max_bytes)) : 0;
+__device__ int valid_num(int dim1,int dim0,int ndim1,int ndim0,int max_num){
+    return dim1<ndim1 ? std::max(0,std::min(ndim0-dim0,max_num)) : 0;
 }
 
 __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOutput *C_fragemnt2,Index &index){
@@ -533,11 +548,61 @@ __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
     }
 }
 
-#define DYNAMIC_SMEM
+__device__ void initFragment(ElementOutput *C){
+    for(int i=0;i<64;i++){
+        C[i] = 0;
+    }
+}
 
-__global__ void GEMM_MMA(MMAarguments arg){
+#define MOV2(dst,src) *reinterpret_cast<float2*>(dst) = *reinterpret_cast<float2*>(src)
+#define MOV4(dst,src) *reinterpret_cast<float4*>(dst) = *reinterpret_cast<float4*>(src)
 
-  #ifdef DYNAMIC_SMEM
+__device__ void epilogue(MMAarguments &arg,ElementOutput *C1,ElementOutput *C2,ElementOutput *Cs,Index &index){
+    int rowCs,colCs,rowC,colC,nbytes;
+    for(int i=0;i<32;i++){
+        rowCs = index.laneidx/4 + index.warpidx*16 + i*64;
+        colCs = index.laneidx%4*2;
+        
+        MOV2(&Cs[ rowCs   *8+colCs],i<16 ? &C1[i*4  ] : &C2[(i-16)*4  ]);
+        MOV2(&Cs[(rowCs+8)*8+colCs],i<16 ? &C1[i*4+2] : &C2[(i-16)*4+2]);
+    }
+
+    __syncthreads();
+
+    ElementOutput res[4],c[4];
+
+    for(int i=0;i<32;i++){
+        rowCs = index.laneidx/2 + index.warpidx*16 + i*64;
+        colCs = index.laneidx%2*4;
+
+        rowC = index.blockIdx_y*128 + index.rowwarp*64 + i/8*16 + index.laneidx/2;
+        colC = index.blockIdx_x*128 + index.colwarp*64 + i%8*8 + index.laneidx%2*4;
+
+        nbytes = valid_num(rowC,colC,arg.problem_size.m(),arg.problem_size.n(),4);
+
+        MOV4(res,&Cs[rowCs*8+colCs]);
+
+        if(nbytes==4) {
+            MOV4(c,&arg.C[rowC*arg.problem_size.n()+colC]);
+            for(int j=0;j<4;j++){
+                res[j] = res[j]*arg.alpha + c[j]*arg.beta;
+            }
+            MOV4(&arg.D[rowC*arg.problem_size.n()+colC],res);
+        }else{
+            for(int j=0;j<4;j++){
+                c[j] = j<nbytes ? arg.C[rowC*arg.problem_size.n()+colC+j] : 0;
+            }
+            for(int j=0;j<4;j++){
+                res[j] = res[j]*arg.alpha + c[j]*arg.beta;
+            }
+            for(int j=0;j<nbytes;j++){
+                arg.D[rowC*arg.problem_size.n()+colC+j] = res[j];
+            }
+        }
+    }
+}
+
+__global__ void GEMM_MMA_fast(MMAarguments arg){
     extern __shared__ ElementInputA tileA[];
 
     ElementInputB *tileB = reinterpret_cast<ElementInputB*>(&tileA[64*128]);
@@ -576,12 +641,15 @@ __global__ void GEMM_MMA(MMAarguments arg){
         loadtileB(arg,&tileB[(i+3)%4*256*8],index); 
         asm("cp.async.commit_group;\n"::); 
     }
-
     storetile(arg,C_fragment1,C_fragment2,index);
-  #else
 
-    __shared__ ElementInputA tileA[3][256*8];
-    __shared__ ElementInputB tileB[3][8*256];
+}
+
+
+__global__ void GEMM_MMA_with_epilogue(MMAarguments arg){
+    extern __shared__ ElementInputA tileA[];
+
+    ElementInputB *tileB = reinterpret_cast<ElementInputB*>(&tileA[64*128]);
 
     ElementOutput C_fragment1[64],C_fragment2[64];
     ElementInputA A_fragment[32];
@@ -591,41 +659,43 @@ __global__ void GEMM_MMA(MMAarguments arg){
 
     const int iters = DIV(arg.problem_size.k(),16);
     
-    loadtileC(arg,C_fragment1,C_fragment2,index);
+    initFragment(C_fragment1);
+    initFragment(C_fragment2);
 
-    loadtileA(arg,tileA[0],index);
-    loadtileB(arg,tileB[0],index);
+    loadtileA(arg,&tileA[0],index);
+    loadtileB(arg,&tileB[0],index);
     asm("cp.async.commit_group;\n"::);
 
-    loadtileA(arg,tileA[1],index);
-    loadtileB(arg,tileB[1],index);
+    loadtileA(arg,&tileA[1*256*8],index);
+    loadtileB(arg,&tileB[1*256*8],index);
+    asm("cp.async.commit_group;\n"::);
+
+    loadtileA(arg,&tileA[2*256*8],index);
+    loadtileB(arg,&tileB[2*256*8],index);
     asm("cp.async.commit_group;\n"::);
 
     for(int i=0;i<iters;i++){
-        asm("cp.async.wait_group 1;\n"::);
+        asm("cp.async.wait_group 2;\n"::);
         __syncthreads();
 
-        ldsA(tileA[i%3],A_fragment,index);
-        ldsB(tileB[i%3],B_fragment,index);
+        ldsA(&tileA[i%4*256*8],A_fragment,index);
+        ldsB(&tileB[i%4*256*8],B_fragment,index);
         mma_tile(arg,A_fragment,B_fragment,C_fragment1,C_fragment2);
         
-        loadtileA(arg,tileA[(i+2)%3],index);
-        loadtileB(arg,tileB[(i+2)%3],index); 
+        loadtileA(arg,&tileA[(i+3)%4*256*8],index);
+        loadtileB(arg,&tileB[(i+3)%4*256*8],index); 
         asm("cp.async.commit_group;\n"::); 
     }
+    epilogue(arg,C_fragment1,C_fragment2,reinterpret_cast<ElementOutput*>(tileA),index);
 
-    storetile(arg,C_fragment1,C_fragment2,index);
-
-  #endif
 }
 
 
 
 void launch_GEMM_MMA(MMAarguments &arg){
     dim3 grid,block;
-  #ifdef DYNAMIC_SMEM
     int smem_size;
-  #endif
+
     // threadblockShape 128 128 8
     // warpShape 64 64 8
     // every block has 4 warps
@@ -637,20 +707,18 @@ void launch_GEMM_MMA(MMAarguments &arg){
     block.x = 128;
     block.y = 1;
     block.z = 1;
-  #ifdef DYNAMIC_SMEM
+
     smem_size = 4*256*8*sizeof(ElementInputA)*2;
-    CUDA_CHECK(cudaFuncSetAttribute((void *)GEMM_MMA, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-  #endif
 
-  #ifdef DYNAMIC_SMEM
-    GEMM_MMA<<<grid,block,smem_size>>>(arg);
-  #else
-    GEMM_MMA<<<grid,block>>>(arg);
-  #endif
+    if(arg.alpha==1&&arg.beta==1){
+        CUDA_CHECK(cudaFuncSetAttribute((void *)GEMM_MMA_fast, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        GEMM_MMA_fast<<<grid,block,smem_size>>>(arg);
+    }else{
+        CUDA_CHECK(cudaFuncSetAttribute((void *)GEMM_MMA_with_epilogue, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        GEMM_MMA_with_epilogue<<<grid,block,smem_size>>>(arg);
+    }
+        
 }
-
-// Create a tuple of problem size for matrix multiplication
-cutlass::gemm::GemmCoord problem_size;
 
 // Initialize tensors using CUTLASS helper functions
 cutlass::HostTensor<ElementInputA, LayoutInputA> tensor_a;  // <- Create matrix A with dimensions M x K
@@ -670,16 +738,12 @@ int main(int argc,const char **argv){
         return 0;
     }
 
-    problem_size = options.problem_size;
+    tensor_a.resize(options.problem_size.mk());
+    tensor_b.resize(options.problem_size.kn());
+    tensor_c.resize(options.problem_size.mn());
+    tensor_d.resize(options.problem_size.mn());
 
-    printf("[%20s] (%d,%d,%d)\n","problem size",problem_size.m(),problem_size.n(),problem_size.k());
-
-    tensor_a.resize(problem_size.mk());
-    tensor_b.resize(problem_size.kn());
-    tensor_c.resize(problem_size.mn());
-    tensor_d.resize(problem_size.mn());
-
-    timer.set(problem_size);
+    timer.set(options.problem_size);
     
     cutlass::reference::device::TensorFillRandomUniform(
         tensor_a.device_view(),
@@ -707,21 +771,17 @@ int main(int argc,const char **argv){
 
     ////////////////////cutlassMMA////////////////////////////////
     timer.bind_run("cutlassMMA",[&]{
-        // Initialize alpha and beta for dot product computation
-        ElementComputeEpilogue alpha = ElementComputeEpilogue(1);
-        ElementComputeEpilogue beta = ElementComputeEpilogue(1);
-
         // Split K dimension into 1 partitions
         int split_k_slices = 1;
 
         // Create a tuple of gemm kernel arguments. This is later passed as arguments to launch
         // instantiated CUTLASS kernel
-        typename Gemm::Arguments arguments{problem_size,  // <- problem size of matrix multiplication
+        typename Gemm::Arguments arguments{options.problem_size,  // <- problem size of matrix multiplication
                                         tensor_a.device_ref(),  // <- reference to matrix A on device
                                         tensor_b.device_ref(),  // <- reference to matrix B on device
                                         tensor_c.device_ref(),  // <- reference to matrix C on device
                                         tensor_d.device_ref(),  // <- reference to matrix D on device
-                                        {alpha, beta},          // <- tuple of alpha and beta
+                                        {options.alpha, options.beta},          // <- tuple of alpha and beta
                                         split_k_slices};        // <- k-dimension split factor
 
         // Using the arguments, query for extra workspace required for matrix multiplication computation
@@ -747,7 +807,7 @@ int main(int argc,const char **argv){
     },options.iterations);
     //////////////////////GEMM_MMA///////////////////////
     {   
-        cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_mma_d(problem_size.mn());
+        cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_mma_d(options.problem_size.mn());
         cutlass::reference::device::TensorFillRandomUniform(
             tensor_mma_d.device_view(),
             3,
@@ -758,11 +818,13 @@ int main(int argc,const char **argv){
 
         timer.bind_run("MMA_tune",[&]{
             MMAarguments mmaArg{
-                problem_size,
+                options.problem_size,
                 tensor_a.device_data(),
                 tensor_b.device_data(),
                 tensor_c.device_data(),
-                tensor_mma_d.device_data()
+                tensor_mma_d.device_data(),
+                options.alpha,
+                options.beta
             };
             launch_GEMM_MMA(mmaArg);
         },options.iterations);
