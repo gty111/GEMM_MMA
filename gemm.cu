@@ -11,6 +11,7 @@
 
 #include <iostream>
 #include <functional>
+#include <cmath>
 
 #define DIV(x,y) ((x)+(y)-1)/(y)
 
@@ -260,10 +261,10 @@ struct Index{
     int laneidx;
     int rowwarp;
     int colwarp;
-    int rowA[2][2][4];
-    int colA[2][2][4];
-    int rowB[2][2][4];
-    int colB[2][2][4];
+    int rowA[2][2];
+    int colA[2][2];
+    int rowB[2][2];
+    int colB[2][2];
     int tileidx[4];
     int a[2][4];
     int b[2][4];
@@ -283,13 +284,11 @@ struct Index{
 
         for(int k=0;k<2;k++){
             for(int i=0;i<2;i++){
-                for(int j=0;j<4;j++){
-                    rowA[k][i][j] = laneidx/2 + warpidx*16 + i*64 + blockIdx_y * 128;
-                    colA[k][i][j] = laneidx%2*4 + j + k*8;
+                rowA[k][i] = laneidx/2 + warpidx*16 + i*64 + blockIdx_y * 128;
+                colA[k][i] = laneidx%2*4 + k*8;
 
-                    rowB[k][i][j] = laneidx%2*4 + j + k*8;
-                    colB[k][i][j] = laneidx/2 + warpidx*16 + i*64 + blockIdx_x * 128;
-                }
+                rowB[k][i] = laneidx%2*4 + k*8;
+                colB[k][i] = laneidx/2 + warpidx*16 + i*64 + blockIdx_x * 128;
             }
         }
         
@@ -324,13 +323,13 @@ __device__ void printtile(T *arr,int row,int col,bool rowMajor){
     }
 }
 
-__device__ bool test(int a0,int b0,int a1,int b1){
-    return a0<a1 && b0 < b1;
+// Continuous elements are continuous in dim0
+__device__ int valid_num(int dim1,int dim0,int ndim1,int ndim0,int max_bytes){
+    return dim1<ndim1 ? std::max(0,std::min(ndim0-dim0,max_bytes)) : 0;
 }
 
 __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOutput *C_fragemnt2,Index &index){
-    int rowtile,coltile,rowC,colC;
-    bool test0,test1;
+    int rowtile,coltile,rowC,colC,nbytes;
     for(int i=0;i<16;i++){
         rowtile = i / 8;
         coltile = i % 8;
@@ -338,14 +337,12 @@ __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOu
             rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8;
             colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
-            test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
-            test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
+            nbytes = valid_num(rowC,colC,arg.problem_size.m(),arg.problem_size.n(),2);
 
-            if(test1){   
+            if(nbytes==2){   
                 *reinterpret_cast<float2*>(&C_fragemnt1[i*4+j*2]) = *reinterpret_cast<float2*>(&arg.C[rowC*arg.problem_size.n()+colC]) ; 
             }else{
-                C_fragemnt1[i*4+j*2]   = test0 ? arg.C[rowC*arg.problem_size.n()+colC] : ElementOutput(0); 
-                C_fragemnt1[i*4+j*2+1] = test1 ? arg.C[rowC*arg.problem_size.n()+colC+1] : ElementOutput(0);
+                C_fragemnt1[i*4+j*2]   = nbytes ? arg.C[rowC*arg.problem_size.n()+colC] : ElementOutput(0); 
             }
         }   
     }
@@ -357,22 +354,19 @@ __device__ void loadtileC(MMAarguments &arg,ElementOutput *C_fragemnt1,ElementOu
             rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8;
             colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
-            test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
-            test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
+            nbytes = valid_num(rowC,colC,arg.problem_size.m(),arg.problem_size.n(),2);
 
-            if(test1){   
+            if(nbytes==2){   
                 *reinterpret_cast<float2*>(&C_fragemnt2[i*4+j*2]) = *reinterpret_cast<float2*>(&arg.C[rowC*arg.problem_size.n()+colC]) ; 
             }else{
-                C_fragemnt2[i*4+j*2]   = test0 ? arg.C[rowC*arg.problem_size.n()+colC] : ElementOutput(0); 
-                C_fragemnt2[i*4+j*2+1] = test1 ? arg.C[rowC*arg.problem_size.n()+colC+1] : ElementOutput(0);
+                C_fragemnt2[i*4+j*2]   = nbytes ? arg.C[rowC*arg.problem_size.n()+colC] : ElementOutput(0); 
             }
         }   
     }
 }
 
 __device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOutput *C_fragment2,Index &index){
-    int rowtile,coltile,rowC,colC;
-    bool test0,test1;
+    int rowtile,coltile,rowC,colC,nbytes;
 
     for(int i=0;i<16;i++){
         rowtile = i / 8;
@@ -381,16 +375,13 @@ __device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOu
             rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8 ;
             colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
-            test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
-            test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
+            nbytes = valid_num(rowC,colC,arg.problem_size.m(),arg.problem_size.n(),2);
 
-            if(test1){   
+            if(nbytes==2){   
                 *reinterpret_cast<float2*>(&arg.D[rowC*arg.problem_size.n()+colC]) = *reinterpret_cast<float2*>(&C_fragment1[i*4+j*2]) ; 
             }else{
-                if(test0)
+                if(nbytes)
                     arg.D[rowC*arg.problem_size.n()+colC] = C_fragment1[i*4+j*2];
-                if(test1)
-                    arg.D[rowC*arg.problem_size.n()+colC+1] = C_fragment1[i*4+j*2+1];
             }
         }   
     }
@@ -402,16 +393,13 @@ __device__ void storetile(MMAarguments &arg,ElementOutput *C_fragment1,ElementOu
             rowC = index.blockIdx_y*128 + index.rowwarp*64 + rowtile*16 + index.laneidx/4 + j*8 ;
             colC = index.blockIdx_x*128 + index.colwarp*64 + coltile*8  + index.laneidx%4*2;
 
-            test0 = test(rowC,colC,arg.problem_size.m(),arg.problem_size.n());
-            test1 = test(rowC,colC+1,arg.problem_size.m(),arg.problem_size.n());
+            nbytes = valid_num(rowC,colC,arg.problem_size.m(),arg.problem_size.n(),2);
 
-            if(test1){   
+            if(nbytes==2){   
                 *reinterpret_cast<float2*>(&arg.D[rowC*arg.problem_size.n()+colC]) = *reinterpret_cast<float2*>(&C_fragment2[i*4+j*2]) ; 
             }else{
-                if(test0)
+                if(nbytes)
                     arg.D[rowC*arg.problem_size.n()+colC] = C_fragment2[i*4+j*2];
-                if(test1)
-                    arg.D[rowC*arg.problem_size.n()+colC+1] = C_fragment2[i*4+j*2+1];
             }
         }   
     }
@@ -516,19 +504,15 @@ __device__ void loadtileA(MMAarguments &arg,ElementInputA *A,Index &index){
 
     for(int k=0;k<2;k++){
         for(int i=0;i<2;i++){
-            // src_in_bytes = TESTA(3) ? 4 : TESTA(2) ? 3 : TESTA(1) ? 2 : TESTA(0) ? 1 : 0;
+            src_in_bytes = valid_num(index.rowA[k][i],index.colA[k][i],arg.problem_size.m(),arg.problem_size.k(),4);
 
-            src_in_bytes = TESTA(3) + TESTA(2) + TESTA(1) + TESTA(0);
-
-            LDGSTSCG(&A[index.tileidx[k*2+i]],&arg.A[index.rowA[k][i][0]*arg.problem_size.k()+index.colA[k][i][0]],16,src_in_bytes*4);
+            LDGSTSCG(&A[index.tileidx[k*2+i]],&arg.A[index.rowA[k][i]*arg.problem_size.k()+index.colA[k][i]],16,src_in_bytes*4);
         }
     }
 
     for(int k=0;k<2;k++){
         for(int i=0;i<2;i++){
-            for(int j=0;j<4;j++){
-                index.colA[k][i][j] += 16;
-            }
+            index.colA[k][i] += 16;
         }
     }
 }
@@ -541,19 +525,15 @@ __device__ void loadtileB(MMAarguments &arg,ElementInputB *B,Index &index){
 
     for(int k=0;k<2;k++){
         for(int i=0;i<2;i++){
-            // src_in_bytes = TESTB(3) ? 4 : TESTB(2) ? 3 : TESTB(1) ? 2 : TESTB(0) ? 1 : 0;
+            src_in_bytes = valid_num(index.colB[k][i],index.rowB[k][i],arg.problem_size.n(),arg.problem_size.k(),4);
 
-            src_in_bytes = TESTB(3) + TESTB(2) + TESTB(1) + TESTB(0);
-
-            LDGSTSCG(&B[index.tileidx[k*2+i]],&arg.B[index.colB[k][i][0]*arg.problem_size.k()+index.rowB[k][i][0]],16,src_in_bytes*4);
+            LDGSTSCG(&B[index.tileidx[k*2+i]],&arg.B[index.colB[k][i]*arg.problem_size.k()+index.rowB[k][i]],16,src_in_bytes*4);
         }
     }
 
     for(int k=0;k<2;k++){
         for(int i=0;i<2;i++){
-            for(int j=0;j<4;j++){
-                index.rowB[k][i][j] += 16;
-            }
+            index.rowB[k][i] += 16;
         }
     }
 }
