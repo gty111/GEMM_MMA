@@ -1,5 +1,7 @@
 # [GEMM MMA](https://gty111.github.io/2023/06/20/gemm-optimize/)
 
+> cutlass:3.1 CUDA:11.4.4
+
 GEMM MMA 首先构建了一个初级的GEMM kernel， 它使用CUDA `mma.sync`指令来使用GPU tensor core单元，之后每次引入一个优化概念并对比性能变化
 
 最终优化的性能: 73.65% (相比cutlass算子，测试维度为8192x8192x8192)
